@@ -120,3 +120,12 @@ _digitapSDK.setPlayerFailed(state);
 ```
 
 `_digitapSDK.setPlayerFailed()` method can be used when the player had failed, so we can record the last score in the leaderboards. The `state` parameter is optional here, but it's recommended if you can add it.
+
+## Debugging
+Games, which include the SDK, can be easily debugged by calling the following from a browser developer console:
+
+```
+_digitapSDK.setDebugging()
+```
+
+This will trigger the `console.log()` events from the SDK to be shown in your console.
