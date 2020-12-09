@@ -1,7 +1,7 @@
 {
   "name": "game-player-sdk",
   "version": "1.0.0",
-  "description": "A TypeScript library used to integrate web games with Digitap's platforms.",
+  "description": "A JavaScript/TypeScript SDK that can be used to integrate HTML5/JavaScript games with Digitap's platforms.",
   "private": true,
   "scripts": {
     "dev": "webpack --mode development",
