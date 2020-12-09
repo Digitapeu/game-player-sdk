@@ -92,6 +92,7 @@ _digitapSDK._afterStartGame = function() {
 ### Integrate game events with the SDK
 Now that the basic setup is done, you will need to integrate your main game events with our SDK. We have some methods that you can use for this: 
 
+
 ```javascript
 let state = 'SOME_RANDOM_GAME_STATE';
 let score = 10;
@@ -100,7 +101,8 @@ let level = 1; // If you don't have levels, leave it as 1
 _digitapSDK.setProgress(state, score, level);
 ```
 
-`_digitapSDK.setProgress()` method can be used to sync player's progress in the game with our GameBox. We suggest you to use this at every score change. The `state` parameter can be a string indicator of which was the last progress for this player.
+`_digitapSDK.setProgress()` method can be used to sync player's progress in the game with our GameBox. We suggest you to use this at every score change. The `state` parameter can be a string indicator of which was the last progress for this player. The `score` is the increased score. The `level` parameter it's the actual level, or 1 if your game don't have levels.
+
 
 ```javascript
 let level = 2;
@@ -108,10 +110,13 @@ let level = 2;
 _digitapSDK.setLevelUp(level);
 ```
 
-`_digitapSDK.setLevelUp()` method can be used when the player gets to the next level, to trigger a "level up" event in the GameBox.
+`_digitapSDK.setLevelUp()` method can be used when the player gets to the next level, to trigger a "level up" event in the GameBox. The `level` parameter indicates the new level the user got to.
+
 
 ```javascript
-_digitapSDK.setPlayerFailed();
+let state = 'FAILED';
+
+_digitapSDK.setPlayerFailed(state);
 ```
 
-`_digitapSDK.setPlayerFailed()` method can be used when the player failed and it will restart the game.
+`_digitapSDK.setPlayerFailed()` method can be used when the player had failed, so we can record the last score in the leaderboards. The `state` parameter is optional here, but it's recommended if you can add it.
