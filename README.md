@@ -6,9 +6,11 @@ Running into any issues? Send us an email to <a href="support@digitap.eu" target
 ## Implementation within games
 The SDK should be integrated within HTML5 games by loading it through our CDN. Implement the following snippet within your game or within the `<head>` section of your `index.html`.
 
+*Make sure that the SDK is loaded before your game starts or while your game is loaded for the best user experience. Not after, and especially not by clicking a button within the game, as then it will take too long for an advertisement to load; making the user wait. **Only load the SDK once!***
+
 ```html
 <!-- Digitap SDK Start -->
-<script src="./main.min.js" type="text/javascript"></script>
+<script src="https://files.digitap.eu/sdk/main.min.js" type="text/javascript"></script>
 <script>
     let showScore = true; // If you want to show score in our GameBox
     let showHighScore = true; // If you want to show high score in our GameBox
