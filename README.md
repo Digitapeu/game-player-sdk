@@ -42,6 +42,7 @@ The SDK should be integrated within HTML5 games by loading it through our CDN. I
 
 *Make sure that the SDK is loaded before your game starts or while your game is loaded for the best user experience. Not after, and especially not by clicking a button within the game, as then it will take too long for an advertisement to load; making the user wait. **Only load the SDK once!***
 
+
 ### Mandatory settings for setup
 After you init the SDK with the following lines of code:
 
@@ -58,7 +59,6 @@ You need to make sure that our events are handled well by your game. For this, y
 ```javascript
 _digitapSDK._afterStartGameFromZero = function() {
     // start the game fresh, from zero
-    console.log("After start game from zero");
 }
 ```
 
@@ -67,7 +67,6 @@ _digitapSDK._afterStartGameFromZero = function() {
 ```javascript
 _digitapSDK._afterContinueWithCurrentScore = function(score) {
     // user paid for extra live, continue game from last score
-    console.log("Continue with current score: ", score);
 }
 ```
 
@@ -76,7 +75,6 @@ _digitapSDK._afterContinueWithCurrentScore = function(score) {
 ```javascript
 _digitapSDK._afterPauseGame = function() {
     // pause game logic / mute audio
-    console.log("After pause game");
 }
 ```
 
@@ -85,8 +83,35 @@ _digitapSDK._afterPauseGame = function() {
 ```javascript
 _digitapSDK._afterStartGame = function() {
     // advertisement done, resume game logic and unmute audio
-    console.log("After start game");
 }
 ```
 
 `_afterStartGame` will be called when we want to resume the game after it was paused. Invoke a method to resume your game.
+
+
+### Integrate game events with the SDK
+Now that the basic setup is done, you will need to integrate your main game events with our SDK. We have some methods that you can use for this: 
+
+```javascript
+let state = 'SOME_RANDOM_GAME_STATE';
+let score = 10;
+let level = 1; // If you don't have levels, leave it as 1
+
+_digitapSDK.setProgress(state, score, level);
+```
+
+`_digitapSDK.setProgress()` method can be used to sync player's progress in the game with our GameBox. We suggest you to use this at every score change. The `state` parameter can be a string indicator of which was the last progress for this player.
+
+```javascript
+let level = 2;
+
+_digitapSDK.setLevelUp(level);
+```
+
+`_digitapSDK.setLevelUp()` method can be used when the player gets to the next level, to trigger a "level up" event in the GameBox.
+
+```javascript
+_digitapSDK.setPlayerFailed();
+```
+
+`_digitapSDK.setPlayerFailed()` method can be used when the player failed and it will restart the game.
