@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Testing SDK</title>
+</head>
+<body>
+    <!-- Digitap SDK Start -->
+    <script src="./main.min.js" type="text/javascript"></script>
+    <script>
+        // SDK SETUP EXAMPLE
+        let showScore = true;
+        let showHighScore = true;
+
+        _digitapSDK.init(showScore, showHighScore);
+
+        _digitapSDK._afterStartGameFromZero = function() {
+            // start the game fresh, from zero
+            console.log("After start game from zero");
+        }
+
+        _digitapSDK._afterContinueWithCurrentScore = function(score) {
+            // user paid for extra live, continue game from last score
+            console.log("Continue with current score: ", score);
+        }
+
+        _digitapSDK._afterStartGame = function() {
+            // advertisement done, resume game logic and unmute audio
+            console.log("After start game");
+        }
+
+        _digitapSDK._afterPauseGame = function() {
+            // pause game logic / mute audio
+            console.log("After pause game");
+        }
+
+        // SDK USAGE EXAMPLE
+        let state = 'SOME_RANDOM_STATE';
+        let score = 10;
+        let level = 1;
+
+        _digitapSDK.setProgress(state, score, level);
+
+        _digitapSDK.setLevelUp(++level);
+
+        _digitapSDK.setPlayerFailed();
+    </script>
+    <!-- Digitap SDK End -->
+</body>
+</html>
