@@ -8,35 +8,40 @@ The SDK should be integrated within HTML5 games by loading it through our CDN. I
 
 ```html
 <!-- Digitap SDK Start -->
-<script src="https://files.digitap.eu/sdk/main.min.js" type="text/javascript"></script>
 <script>
+    window.digitapSDK=window.digitapSDK||function(){(digitapSDK.q=digitapSDK.q||[]).push(arguments)};digitapSDK.l=+new Date;
+
+    // === SETUP EXAMPLE === //
+    // Edit only from here downwards
+    
     let showScore = true; // If you want to show score in our GameBox
     let showHighScore = true; // If you want to show high score in our GameBox
 
     // Init the SDK
-    _digitapSDK.init(showScore, showHighScore);
+    digitapSDK('init', showScore, showHighScore);
 
     // Handle the events from our GameBox
-    _digitapSDK._afterStartGameFromZero = function() {
+    digitapSDK('setCallback', 'afterStartGameFromZero', function() {
         // start the game fresh, from zero
         console.log("After start game from zero");
-    }
+    });
 
-    _digitapSDK._afterContinueWithCurrentScore = function(score) {
+    digitapSDK('setCallback', 'afterContinueWithCurrentScore', function(score) {
         // user paid for extra live, continue game from last score
         console.log("Continue with current score: ", score);
-    }
+    });
 
-    _digitapSDK._afterStartGame = function() {
+    digitapSDK('setCallback', 'afterStartGame', function() {
         // advertisement done, resume game logic and unmute audio
         console.log("After start game");
-    }
+    });
 
-    _digitapSDK._afterPauseGame = function() {
+    digitapSDK('setCallback', 'afterPauseGame', function() {
         // pause game logic / mute audio
         console.log("After pause game");
-    }
+    });
 </script>
+<script src="https://files.digitap.eu/sdk/main.min.js" async defer></script>
 <!-- Digitap SDK End -->
 ```
 
@@ -51,42 +56,42 @@ let showScore = true; // If you want to show score in our GameBox
 let showHighScore = true; // If you want to show high score in our GameBox
 
 // Init the SDK
-_digitapSDK.init(showScore, showHighScore);
+digitapSDK('init', showScore, showHighScore);
 ```
 
 You need to make sure that our events are handled well by your game. For this, you need to declare some callbacks that will be used when events trigger from the GameBox. These are:
 
 ```javascript
-_digitapSDK._afterStartGameFromZero = function() {
+digitapSDK('setCallback', 'afterStartGameFromZero', function() {
     // start the game fresh, from zero
-}
+});
 ```
 
-`_afterStartGameFromZero` will be called the first time when the game starts but also if we want to reset the game for that session. You should reset the score and level (if its the case) and start the game.
+`afterStartGameFromZero` will be called the first time when the game starts but also if we want to reset the game for that session. You should reset the score and level (if its the case) and start the game.
 
 ```javascript
-_digitapSDK._afterContinueWithCurrentScore = function(score) {
+digitapSDK('setCallback', 'afterContinueWithCurrentScore', function(score) {
     // user paid for extra live, continue game from last score
-}
+});
 ```
 
-`_afterContinueWithCurrentScore` will be called after the user failed but he paid to continue the game from the last score. You will receive as a parameter the last score we recorded.
+`afterContinueWithCurrentScore` will be called after the user failed but he paid to continue the game from the last score. You will receive as a parameter the last score we recorded.
 
 ```javascript
-_digitapSDK._afterPauseGame = function() {
+digitapSDK('setCallback', 'afterPauseGame', function() {
     // pause game logic / mute audio
-}
+});
 ```
 
-`_afterPauseGame` will be called when we want to pause the game to run an advertisement. Invoke a method to pause AND mute your game. It is important that the game is muted, as background audio through video advertisements is forbidden.
+`afterPauseGame` will be called when we want to pause the game to run an advertisement. Invoke a method to pause AND mute your game. It is important that the game is muted, as background audio through video advertisements is forbidden.
 
 ```javascript
-_digitapSDK._afterStartGame = function() {
+digitapSDK('setCallback', 'afterStartGame', function() {
     // advertisement done, resume game logic and unmute audio
-}
+});
 ```
 
-`_afterStartGame` will be called when we want to resume the game after it was paused. Invoke a method to resume your game.
+`afterStartGame` will be called when we want to resume the game after it was paused. Invoke a method to resume your game.
 
 
 ### Integrate game events with the SDK
@@ -98,34 +103,25 @@ let state = 'SOME_RANDOM_GAME_STATE';
 let score = 10;
 let level = 1; // If you don't have levels, leave it as 1
 
-_digitapSDK.setProgress(state, score, level);
+digitapSDK('setProgress', state, score, level);
 ```
 
-`_digitapSDK.setProgress()` method can be used to sync player's progress in the game with our GameBox. We suggest you to use this at every score change. The `state` parameter can be a string indicator of which was the last progress for this player. The `score` is the increased score. The `level` parameter it's the actual level, or 1 if your game don't have levels.
+`setProgress` method can be used to sync player's progress in the game with our GameBox. We suggest you to use this at every score change. The `state` parameter can be a string indicator of which was the last progress for this player. The `score` is the increased score. The `level` parameter it's the actual level, or 1 if your game don't have levels.
 
 
 ```javascript
 let level = 2;
 
-_digitapSDK.setLevelUp(level);
+digitapSDK('setLevelUp', level);
 ```
 
-`_digitapSDK.setLevelUp()` method can be used when the player gets to the next level, to trigger a "level up" event in the GameBox. The `level` parameter indicates the new level the user got to.
+`setLevelUp` method can be used when the player gets to the next level, to trigger a "level up" event in the GameBox. The `level` parameter indicates the new level the user got to.
 
 
 ```javascript
 let state = 'FAILED';
 
-_digitapSDK.setPlayerFailed(state);
+digitapSDK('setPlayerFailed', state);
 ```
 
-`_digitapSDK.setPlayerFailed()` method can be used when the player had failed, so we can record the last score in the leaderboards. The `state` parameter is optional here, but it's recommended if you can add it.
-
-## Debugging
-Games, which include the SDK, can be easily debugged by calling the following from a browser developer console:
-
-```
-_digitapSDK.setDebugging()
-```
-
-This will trigger the `console.log()` events from the SDK to be shown in your console.
+`setPlayerFailed` method can be used when the player had failed, so we can record the last score in the leaderboards. The `state` parameter is optional here, but it's recommended if you can add it.

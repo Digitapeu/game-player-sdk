@@ -22,17 +22,17 @@
             console.log("After start game from zero");
         });
 
-        digitapSDK('setCallback', 'afterStartGameFromZero', function(score) {
+        digitapSDK('setCallback', 'afterContinueWithCurrentScore', function(score) {
             // user paid for extra live, continue game from last score
             console.log("Continue with current score: ", score);
         });
 
-        digitapSDK('setCallback', 'afterStartGameFromZero', function() {
+        digitapSDK('setCallback', 'afterStartGame', function() {
             // advertisement done, resume game logic and unmute audio
             console.log("After start game");
         });
 
-        digitapSDK('setCallback', 'afterStartGameFromZero', function() {
+        digitapSDK('setCallback', 'afterPauseGame', function() {
             // pause game logic / mute audio
             console.log("After pause game");
         });
