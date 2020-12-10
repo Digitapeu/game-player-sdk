@@ -33,6 +33,55 @@ class DigitapGamePlayerSDK {
   };
 
   /**
+   * Call a method from the class,
+   * through a queue.
+   * 
+   * @param args array
+   */
+  public static processQueue(...args: any[]): void {
+    DigitapGamePlayerSDK.debug("Processing Queue ->", args);
+
+    if (typeof args[0] === "string") {
+      DigitapGamePlayerSDK[
+        args[0] as
+          | "init"
+          | "setProgress"
+          | "setLevelUp"
+          | "setPlayerFailed"
+          | "setCallback"
+      ].apply(DigitapGamePlayerSDK, args.slice(1));
+    }
+  }
+
+  /**
+   * Process a current queue.
+   * 
+   * @param queue array
+   */
+  public static processOldQueue(queue: []): void {
+    queue.forEach((args: any) => {
+      this.processQueue(...args);
+    });
+  }
+
+  /**
+   * Sets a callback method.
+   * 
+   * @param fn string
+   * @param callback function
+   */
+  public static setCallback(
+    fn:
+      | "afterStartGameFromZero"
+      | "afterContinueWithCurrentScore"
+      | "afterStartGame"
+      | "afterPauseGame",
+    callback: any
+  ): void {
+    this[fn] = callback;
+  }
+
+  /**
    * Init a new game connection with
    * the parent platform.
    *
@@ -133,7 +182,11 @@ class DigitapGamePlayerSDK {
     window.addEventListener(
       "message",
       function (event) {
-        self.debug("Event Received -> %s -> %s", JSON.stringify(event.data), JSON.stringify(event.origin));
+        self.debug(
+          "Event Received -> %o -> %o",
+          event.data,
+          event.origin
+        );
 
         if (
           typeof event.data == "object" &&
@@ -152,11 +205,11 @@ class DigitapGamePlayerSDK {
           if (event.data.type) {
             switch (event.data.type) {
               case "SDK_START_GAME":
-                self._afterStartGame();
+                self.afterStartGame();
                 break;
 
               case "SDK_PAUSE_GAME":
-                self._afterPauseGame();
+                self.afterPauseGame();
                 break;
 
               case "SDK_START_GAME_FROM_ZERO":
@@ -164,13 +217,13 @@ class DigitapGamePlayerSDK {
                 self.progress.level = 0;
                 self.progress.continueScore = 0;
 
-                self._afterStartGameFromZero();
+                self.afterStartGameFromZero();
                 break;
 
               case "SDK_CONTINUE_WITH_CURRENT_SCORE":
                 self.progress.score = self.progress.continueScore;
 
-                self._afterContinueWithCurrentScore(self.progress.score);
+                self.afterContinueWithCurrentScore(self.progress.score);
                 break;
 
               default:
@@ -193,13 +246,13 @@ class DigitapGamePlayerSDK {
   /**
    * Empty methods for game developer to use.
    */
-  public static _afterStartGameFromZero() {}
+  public static afterStartGameFromZero() {}
 
-  public static _afterContinueWithCurrentScore(score: number) {}
+  public static afterContinueWithCurrentScore(score: number) {}
 
-  public static _afterStartGame() {}
+  public static afterStartGame() {}
 
-  public static _afterPauseGame() {}
+  public static afterPauseGame() {}
 
   /**
    * If user is debugging, show some console logs.
@@ -221,4 +274,11 @@ class DigitapGamePlayerSDK {
   }
 }
 
-export { DigitapGamePlayerSDK };
+// Read the current queue
+if (typeof (<any>window).digitapSDK !== "undefined") {
+  let oldQueue = (<any>window).digitapSDK.q;
+  DigitapGamePlayerSDK.processOldQueue(oldQueue);
+}
+
+// Watch the queue with new method
+(<any>window).digitapSDK = DigitapGamePlayerSDK.processQueue;

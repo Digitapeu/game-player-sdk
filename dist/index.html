@@ -6,46 +6,48 @@
     <title>Testing SDK</title>
 </head>
 <body>
-    <!-- Digitap SDK Start -->
-    <script src="./main.min.js" type="text/javascript"></script>
+    <!-- Digitap SDK -->
+    <script async defer src="./main.min.js"></script>
     <script>
+        window.digitapSDK=window.digitapSDK||function(){(digitapSDK.q=digitapSDK.q||[]).push(arguments)};digitapSDK.l=+new Date;
+        
         // SDK SETUP EXAMPLE
         let showScore = true;
         let showHighScore = true;
 
-        _digitapSDK.init(showScore, showHighScore);
+        digitapSDK('init', showScore, showHighScore);
 
-        _digitapSDK._afterStartGameFromZero = function() {
+        digitapSDK('setCallback', 'afterStartGameFromZero', function() {
             // start the game fresh, from zero
             console.log("After start game from zero");
-        }
+        });
 
-        _digitapSDK._afterContinueWithCurrentScore = function(score) {
+        digitapSDK('setCallback', 'afterStartGameFromZero', function(score) {
             // user paid for extra live, continue game from last score
             console.log("Continue with current score: ", score);
-        }
+        });
 
-        _digitapSDK._afterStartGame = function() {
+        digitapSDK('setCallback', 'afterStartGameFromZero', function() {
             // advertisement done, resume game logic and unmute audio
             console.log("After start game");
-        }
+        });
 
-        _digitapSDK._afterPauseGame = function() {
+        digitapSDK('setCallback', 'afterStartGameFromZero', function() {
             // pause game logic / mute audio
             console.log("After pause game");
-        }
+        });
 
         // SDK USAGE EXAMPLE
         let state = 'SOME_RANDOM_STATE';
         let score = 10;
         let level = 1;
 
-        _digitapSDK.setProgress(state, score, level);
+        digitapSDK('setProgress', state, score, level);
 
-        _digitapSDK.setLevelUp(++level);
+        digitapSDK('setLevelUp', ++level);
 
-        _digitapSDK.setPlayerFailed();
+        digitapSDK('setPlayerFailed', state);
     </script>
-    <!-- Digitap SDK End -->
+    <!-- End Digitap SDK -->
 </body>
 </html>
