@@ -113,8 +113,18 @@ class DigitapGamePlayerSDK {
       this.listenGameboxEvents();
 
       // Set the canvas fullwidth
-      let canvas: HTMLCollection = document.getElementsByTagName("canvas");
-      canvas[0].setAttribute("style", "width: 100%; height: 100%; margin: 0;");
+      const canvas: HTMLCollection = document.getElementsByTagName("canvas");
+      
+      setTimeout(
+        () => {
+          let canvasStyle = canvas[0].getAttribute("style");
+          canvas[0].setAttribute(
+            "style",
+            canvasStyle + "width: 100%; margin: 0; padding: 0;"
+          );
+        },
+        2000
+      );
     }
 
     // Set SDK as loaded to prevent re-initiation
