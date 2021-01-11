@@ -275,16 +275,11 @@ class DigitapGamePlayerSDK {
    * @param params any[]
    */
   private static debug(message?: any, ...params: any[]): void {
-    if (!this.isDebugging) {
+    const parentWindow: any = window.parent;
+    
+    if (parentWindow.sdkdebug) {
       console.log("DigitapGamePlayerSDK -> " + message, ...params);
     }
-  }
-
-  /**
-   * Helper method to set SDK as debugging.
-   */
-  public static setDebugging(): void {
-    this.isDebugging = true;
   }
 }
 
