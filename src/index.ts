@@ -275,8 +275,8 @@ class DigitapGamePlayerSDK {
    * @param params any[]
    */
   private static debug(message?: any, ...params: any[]): void {
-    const parentWindow: any = window.parent;
-    
+    const parentWindow: any = window;
+
     if (parentWindow.sdkdebug) {
       console.log("DigitapGamePlayerSDK -> " + message, ...params);
     }
