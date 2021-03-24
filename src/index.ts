@@ -112,15 +112,22 @@ class DigitapGamePlayerSDK {
       // Watch for messages from GameBox
       this.listenGameboxEvents();
 
-      // Set the canvas fullwidth
+      // Set the canvas fullwidth & blue screen fix
       const canvas: HTMLCollection = document.getElementsByTagName("canvas");
+      const html: HTMLCollection = document.getElementsByTagName("html");
       
       setTimeout(
         () => {
           let canvasStyle = canvas[0].getAttribute("style");
           canvas[0].setAttribute(
             "style",
-            canvasStyle + "width: 100%; margin: 0; padding: 0;"
+            canvasStyle + "width: 100%; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none;"
+          );
+
+          let htmlStyle = html[0].getAttribute("style");
+          html[0].setAttribute(
+            "style",
+            htmlStyle + "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
           );
         },
         2000
