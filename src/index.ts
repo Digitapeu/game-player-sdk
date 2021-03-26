@@ -127,7 +127,7 @@ class DigitapGamePlayerSDK {
           let htmlStyle = html[0].getAttribute("style");
           html[0].setAttribute(
             "style",
-            htmlStyle + "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
+            (htmlStyle ? htmlStyle : "") + "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
           );
         },
         2000
