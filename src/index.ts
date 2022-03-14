@@ -18,6 +18,7 @@ class DigitapGamePlayerSDK {
     "https://wam.app",
     "https://app.wam.app",
     "https://wam.eu",
+    "https://play.wam.app",
     "http://localhost:63342",
     "http://localhost:8080",
     "http://localhost:3000",
@@ -248,7 +249,7 @@ class DigitapGamePlayerSDK {
               case "SDK_CONTINUE_WITH_CURRENT_SCORE":
                 self.progress.score = self.progress.continueScore;
 
-                self.afterContinueWithCurrentScore(self.progress.score);
+                self.afterContinueWithCurrentScore(self.progress.score, self.progress.level);
                 break;
 
               default:
@@ -273,7 +274,7 @@ class DigitapGamePlayerSDK {
    */
   public static afterStartGameFromZero() {}
 
-  public static afterContinueWithCurrentScore(score: number) {}
+  public static afterContinueWithCurrentScore(score: number, level: number) {}
 
   public static afterStartGame() {}
 
