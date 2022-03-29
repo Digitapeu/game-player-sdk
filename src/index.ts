@@ -19,6 +19,7 @@ class DigitapGamePlayerSDK {
     "https://app.wam.app",
     "https://wam.eu",
     "https://play.wam.app",
+    "https://stage.wam.app",
     "http://localhost:63342",
     "http://localhost:8080",
     "http://localhost:3000",
