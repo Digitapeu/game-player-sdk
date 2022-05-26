@@ -7,6 +7,10 @@ type Progress = {
   continueScore: number;
 };
 
+interface CanvasElement extends HTMLCanvasElement {
+  captureStream(frameRate?: number): MediaStream;
+}
+
 class DigitapGamePlayerSDK {
   public static gameObject: any = null;
   private static isLoaded: boolean = false;
@@ -41,7 +45,7 @@ class DigitapGamePlayerSDK {
   /**
    * Call a method from the class,
    * through a queue.
-   * 
+   *
    * @param args array
    */
   public static processQueue(...args: any[]): void {
@@ -61,7 +65,7 @@ class DigitapGamePlayerSDK {
 
   /**
    * Process a current queue.
-   * 
+   *
    * @param queue array
    */
   public static processOldQueue(queue: []): void {
@@ -72,7 +76,7 @@ class DigitapGamePlayerSDK {
 
   /**
    * Sets a callback method.
-   * 
+   *
    * @param fn string
    * @param callback function
    */
@@ -117,27 +121,29 @@ class DigitapGamePlayerSDK {
 
       // Watch for messages from GameBox
       this.listenGameboxEvents();
+      
+      // Watch for messages from Streamr
+      this.listenStreamrEvents();
 
       // Set the canvas fullwidth & blue screen fix
       const canvas: HTMLCollection = document.getElementsByTagName("canvas");
       const html: HTMLCollection = document.getElementsByTagName("html");
-      
-      setTimeout(
-        () => {
-          let canvasStyle = canvas[0].getAttribute("style");
-          canvas[0].setAttribute(
-            "style",
-            canvasStyle + "width: 100%; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none;"
-          );
 
-          let htmlStyle = html[0].getAttribute("style");
-          html[0].setAttribute(
-            "style",
-            (htmlStyle ? htmlStyle : "") + "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
-          );
-        },
-        2000
-      );
+      setTimeout(() => {
+        let canvasStyle = canvas[0].getAttribute("style");
+        canvas[0].setAttribute(
+          "style",
+          canvasStyle +
+            "width: 100%; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none;"
+        );
+
+        let htmlStyle = html[0].getAttribute("style");
+        html[0].setAttribute(
+          "style",
+          (htmlStyle ? htmlStyle : "") +
+            "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
+        );
+      }, 2000);
     }
 
     // Set SDK as loaded to prevent re-initiation
@@ -209,11 +215,7 @@ class DigitapGamePlayerSDK {
     window.addEventListener(
       "message",
       function (event) {
-        self.debug(
-          "Event Received -> %o -> %o",
-          event.data,
-          event.origin
-        );
+        self.debug("Event Received -> %o -> %o", event.data, event.origin);
 
         if (
           typeof event.data == "object" &&
@@ -250,7 +252,10 @@ class DigitapGamePlayerSDK {
               case "SDK_CONTINUE_WITH_CURRENT_SCORE":
                 self.progress.score = self.progress.continueScore;
 
-                self.afterContinueWithCurrentScore(self.progress.score, self.progress.level);
+                self.afterContinueWithCurrentScore(
+                  self.progress.score,
+                  self.progress.level
+                );
                 break;
 
               default:
@@ -268,6 +273,233 @@ class DigitapGamePlayerSDK {
       },
       false
     );
+  }
+
+  /**
+   * Start listening for messages
+   * from the Streamr platform.
+   */
+  private static listenStreamrEvents(): void {
+    let canvas: CanvasElement = null;
+    let stream: any = null;
+    let connection: any = null;
+    let channel: any = null;
+    let iceCandidate: any = null;
+    let connected = false;
+    let isNegotiationNeeded = false;
+
+    let self = this;
+    self.debug('Init Streamr v1.0.2');
+
+    window.addEventListener("message", async (event) => {
+      try {
+        self.debug('Streamr Event received', event.data);
+
+        if (!event.data || typeof event.data !== "object") {
+          return;
+        }
+
+        const { controller, type, action, offer, tournament_id, username } = event.data;
+
+        self.debug('Streamr Event details: ', controller, type, action, offer, tournament_id, username);
+
+        if (controller !== "_digitapApp" && type !== "webrtc") {
+          return;
+        }
+
+        if (!connected) {
+          canvas = <CanvasElement> document.querySelector("canvas");
+          stream = canvas.captureStream(30);
+          connection = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          channel = connection.createDataChannel(`streamr-${tournament_id}-${username}`, {
+            negotiated: true,
+            id: 0,
+          });
+        }
+
+        if (action === "close") {
+          for (let sender of connection.getSenders()) {
+            connection.removeTrack(sender);
+          }
+
+          canvas = null;
+          stream = null;
+
+          channel.send(JSON.stringify({ type: 'streamr', action: 'close' }));
+          connection.close();
+
+          connection = null;
+          channel = null;
+          iceCandidate = null;
+          connected = false;
+          isNegotiationNeeded = false;
+          return;
+        }
+
+        if (action === "init") {
+          for (const track of stream.getTracks()) {
+            connection.addTrack(track, stream);
+          }
+
+          const onConnectionStateChange = (e: any) => {
+            console.log(
+              "__WEBRTC.onConnectionStateChange__",
+              connection.connectionState
+            );
+            switch (connection.connectionState) {
+              case "connected":
+                connected = true;
+
+                (<Window>event.source).postMessage(
+                  { type: "streamr", action: "connected" },
+                  event.origin
+                );
+                break;
+              case "disconnected":
+                for (let sender of connection.getSenders()) {
+                  connection.removeTrack(sender);
+                }
+                canvas = null;
+                stream = null;
+
+                (<Window>event.source).postMessage(
+                  { type: "streamr", action: "disconnected" },
+                  event.origin
+                );
+
+                channel.close();
+                connection.close();
+                connection.removeEventListener(
+                  "connectionstatechange",
+                  onConnectionStateChange
+                );
+                connection.removeEventListener(
+                  "iceconnectionstatechange",
+                  onIceConnectionStateChange
+                );
+                connection.removeEventListener("icecandidate", onIceCandidate);
+                connection.removeEventListener(
+                  "onnegotiationneeded",
+                  onNegotiationNeeded
+                );
+                connection.removeEventListener(
+                  "onsignalingstatechange",
+                  onSignalingStateChange
+                );
+                channel.removeEventListener("message", onMessage);
+
+                connection = null;
+                channel = null;
+                iceCandidate = null;
+                connected = false;
+
+                break;
+            }
+          };
+
+          const onIceConnectionStateChange = (event: any) => {
+            console.log(
+              "__WEBRTC.onICEConnectionStateChange__",
+              connection.iceConnectionState
+            );
+            switch (connection.iceConnectionState) {
+              case "connected":
+                break;
+              case "disconnected":
+              case "failed":
+                connection.restartIce();
+                break;
+            }
+          };
+
+          const onIceCandidate = (e: any) => {
+            try {
+              self.debug("__WEBRTC.onICECandidate__", e.candidate);
+              
+              if (e.candidate) {
+                iceCandidate = e.candidate;
+              } else {
+                self.debug('__WEBRTC.localDescription__', connection.localDescription);
+
+                (<Window>event.source).postMessage(
+                  {
+                    type: "streamr",
+                    action: "answer",
+                    offer: window.btoa(
+                      JSON.stringify(connection.localDescription)
+                    ),
+                  },
+                  event.origin
+                );
+              }
+            } catch (err) {
+              console.error("__WEBRTC.onICECandidate__", err.message);
+            }
+          };
+
+          const onMessage = async (event: any) => {
+            try {
+              if (!event.data) {
+                return;
+              }
+
+              const message = JSON.parse(event.data);
+
+              if (message.iceCandidate) {
+                await connection.addIceCandidate(message.iceCandidate);
+                channel.send(JSON.stringify({ iceCandidate }));
+              }
+            } catch (err) {
+              console.error("__WEBRTC.onMessage__", err.message);
+            }
+          };
+
+          const onNegotiationNeeded = async (event: any) => {
+            try {
+              if (isNegotiationNeeded) {
+                return;
+              }
+
+              await connection.setRemoteDescription(JSON.parse(offer));
+              await connection.setLocalDescription(
+                await connection.createAnswer()
+              );
+            } catch (err) {
+              console.error("__WEBRTC.onNegotiationNeeded", err.message);
+            }
+          };
+          
+          const onSignalingStateChange = (e: any) =>
+            (isNegotiationNeeded = connection.signalingState !== "stable");
+
+          connection.addEventListener(
+            "connectionstatechange",
+            onConnectionStateChange
+          );
+          connection.addEventListener(
+            "iceconnectionstatechange",
+            onIceConnectionStateChange
+          );
+          connection.addEventListener("icecandidate", onIceCandidate);
+          connection.addEventListener(
+            "onnegotiationneeded",
+            onNegotiationNeeded
+          );
+          connection.addEventListener(
+            "onsignalingstatechange",
+            onSignalingStateChange
+          );
+          channel.addEventListener("message", onMessage);
+
+          await connection.setRemoteDescription(JSON.parse(offer));
+          await connection.setLocalDescription(await connection.createAnswer());
+        }
+      } catch (err) {
+        console.error("__WEBRTC__", err.message);
+      }
+    });
   }
 
   /**
