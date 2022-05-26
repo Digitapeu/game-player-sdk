@@ -121,7 +121,7 @@ class DigitapGamePlayerSDK {
 
       // Watch for messages from GameBox
       this.listenGameboxEvents();
-      
+
       // Watch for messages from Streamr
       this.listenStreamrEvents();
 
@@ -289,34 +289,46 @@ class DigitapGamePlayerSDK {
     let isNegotiationNeeded = false;
 
     let self = this;
-    self.debug('Init Streamr v1.0.2');
+    self.debug("Init Streamr v1.0.3");
 
     window.addEventListener("message", async (event) => {
       try {
-        self.debug('Streamr Event received', event.data);
+        self.debug("Streamr Event received", event.data);
 
         if (!event.data || typeof event.data !== "object") {
           return;
         }
 
-        const { controller, type, action, offer, tournament_id, username } = event.data;
+        const { controller, type, action, offer, tournament_id, username } =
+          event.data;
 
-        self.debug('Streamr Event details: ', controller, type, action, offer, tournament_id, username);
+        self.debug(
+          "Streamr Event details: ",
+          controller,
+          type,
+          action,
+          offer,
+          tournament_id,
+          username
+        );
 
         if (controller !== "_digitapApp" && type !== "webrtc") {
           return;
         }
 
         if (!connected) {
-          canvas = <CanvasElement> document.querySelector("canvas");
+          canvas = <CanvasElement>document.querySelector("canvas");
           stream = canvas.captureStream(30);
           connection = new RTCPeerConnection({
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
           });
-          channel = connection.createDataChannel(`streamr-${tournament_id}-${username}`, {
-            negotiated: true,
-            id: 0,
-          });
+          channel = connection.createDataChannel(
+            `streamr-${tournament_id}-${username}`,
+            {
+              negotiated: true,
+              id: 0,
+            }
+          );
         }
 
         if (action === "close") {
@@ -327,7 +339,7 @@ class DigitapGamePlayerSDK {
           canvas = null;
           stream = null;
 
-          channel.send(JSON.stringify({ type: 'streamr', action: 'close' }));
+          channel.send(JSON.stringify({ type: "streamr", action: "close" }));
           connection.close();
 
           connection = null;
@@ -417,11 +429,14 @@ class DigitapGamePlayerSDK {
           const onIceCandidate = (e: any) => {
             try {
               self.debug("__WEBRTC.onICECandidate__", e.candidate);
-              
+
               if (e.candidate) {
                 iceCandidate = e.candidate;
               } else {
-                self.debug('__WEBRTC.localDescription__', connection.localDescription);
+                self.debug(
+                  "__WEBRTC.localDescription__",
+                  connection.localDescription
+                );
 
                 (<Window>event.source).postMessage(
                   {
@@ -470,7 +485,7 @@ class DigitapGamePlayerSDK {
               console.error("__WEBRTC.onNegotiationNeeded", err.message);
             }
           };
-          
+
           const onSignalingStateChange = (e: any) =>
             (isNegotiationNeeded = connection.signalingState !== "stable");
 
@@ -536,3 +551,9 @@ if (typeof (<any>window).digitapSDK !== "undefined") {
 
 // Watch the queue with new method
 (<any>window).digitapSDK = DigitapGamePlayerSDK.processQueue;
+
+// Force the logs to be hidden
+const log = window.console.log;
+window.console.log = function (...args: any) {
+  return true;
+};
