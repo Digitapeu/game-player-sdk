@@ -123,7 +123,7 @@ class DigitapGamePlayerSDK {
       this.listenGameboxEvents();
 
       // Watch for messages from Streamr
-      this.listenStreamrEvents();
+      // this.listenStreamrEvents();
 
       // Set the canvas fullwidth & blue screen fix
       const canvas: HTMLCollection = document.getElementsByTagName("canvas");
@@ -289,7 +289,7 @@ class DigitapGamePlayerSDK {
     let isNegotiationNeeded = false;
 
     let self = this;
-    self.debug("Init Streamr v1.0.3");
+    self.debug("Init Streamr v1.0.4");
 
     window.addEventListener("message", async (event) => {
       try {
