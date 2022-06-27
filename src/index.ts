@@ -123,7 +123,7 @@ class DigitapGamePlayerSDK {
       this.listenGameboxEvents();
 
       // Watch for messages from Streamr
-      // this.listenStreamrEvents();
+      this.listenStreamrEvents();
 
       // Set the canvas fullwidth & blue screen fix
       const canvas: HTMLCollection = document.getElementsByTagName("canvas");
@@ -215,7 +215,7 @@ class DigitapGamePlayerSDK {
     window.addEventListener(
       "message",
       function (event) {
-        self.debug("Event Received -> %o -> %o", event.data, event.origin);
+        DigitapGamePlayerSDK.debug("Event Received -> %o -> %o", event.data, event.origin);
 
         if (
           typeof event.data == "object" &&
@@ -225,7 +225,7 @@ class DigitapGamePlayerSDK {
           let originIndex = self.allowedOrigins.indexOf(event.origin);
 
           if (originIndex === -1) {
-            self.debug("Error: Origin not allowed inside game container!");
+            DigitapGamePlayerSDK.debug("Error: Origin not allowed inside game container!");
             return;
           } else {
             self.origin = self.allowedOrigins[originIndex];
@@ -259,7 +259,7 @@ class DigitapGamePlayerSDK {
                 break;
 
               default:
-                self.debug(
+                DigitapGamePlayerSDK.debug(
                   'Error: `data.type` = "' +
                     event.data.type +
                     '" not found! Please check `readme.md` of data collector package!'
@@ -267,7 +267,7 @@ class DigitapGamePlayerSDK {
                 break;
             }
           } else {
-            self.debug("Error: `event.data.type` should be implemented!");
+            DigitapGamePlayerSDK.debug("Error: `event.data.type` should be implemented!");
           }
         }
       },
@@ -289,11 +289,11 @@ class DigitapGamePlayerSDK {
     let isNegotiationNeeded = false;
 
     let self = this;
-    self.debug("Init Streamr v1.0.4");
+    self.debug("Init Streamr v1.0.8");
 
     window.addEventListener("message", async (event) => {
       try {
-        self.debug("Streamr Event received", event.data);
+        DigitapGamePlayerSDK.debug("Streamr Event received", event.data);
 
         if (!event.data || typeof event.data !== "object") {
           return;
@@ -302,7 +302,7 @@ class DigitapGamePlayerSDK {
         const { controller, type, action, offer, tournament_id, username } =
           event.data;
 
-        self.debug(
+        DigitapGamePlayerSDK.debug(
           "Streamr Event details: ",
           controller,
           type,
@@ -537,9 +537,9 @@ class DigitapGamePlayerSDK {
   private static debug(message?: any, ...params: any[]): void {
     const parentWindow: any = window;
 
-    if (parentWindow.sdkdebug) {
+    // if (parentWindow.sdkdebug) {
       console.log("DigitapGamePlayerSDK -> " + message, ...params);
-    }
+    // }
   }
 }
 
