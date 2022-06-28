@@ -289,7 +289,7 @@ class DigitapGamePlayerSDK {
     let isNegotiationNeeded = false;
 
     let self = this;
-    self.debug("Init Streamr v1.0.8");
+    self.debug("Init Streamr v1.0.11");
 
     window.addEventListener("message", async (event) => {
       try {
@@ -312,207 +312,209 @@ class DigitapGamePlayerSDK {
           username
         );
 
-        if (controller !== "_digitapApp" && type !== "webrtc") {
+        if (controller !== "_digitapApp" || type !== "webrtc") {
           return;
         }
 
-        // if (!connected) {
-        //   canvas = <CanvasElement>document.querySelector("canvas");
-        //   stream = canvas.captureStream(30);
-        //   connection = new RTCPeerConnection({
-        //     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        //   });
-        //   channel = connection.createDataChannel(
-        //     `streamr-${tournament_id}-${username}`,
-        //     {
-        //       negotiated: true,
-        //       id: 0,
-        //     }
-        //   );
-        // }
+        DigitapGamePlayerSDK.debug("Streamr –> Passed validation");
 
-        // if (action === "close") {
-        //   for (let sender of connection.getSenders()) {
-        //     connection.removeTrack(sender);
-        //   }
+        if (!connected) {
+          canvas = <CanvasElement>document.querySelector("canvas");
+          stream = canvas.captureStream(30);
+          connection = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+          });
+          channel = connection.createDataChannel(
+            `streamr-${tournament_id}-${username}`,
+            {
+              negotiated: true,
+              id: 0,
+            }
+          );
+        }
 
-        //   canvas = null;
-        //   stream = null;
+        if (action === "close") {
+          for (let sender of connection.getSenders()) {
+            connection.removeTrack(sender);
+          }
 
-        //   channel.send(JSON.stringify({ type: "streamr", action: "close" }));
-        //   connection.close();
+          canvas = null;
+          stream = null;
 
-        //   connection = null;
-        //   channel = null;
-        //   iceCandidate = null;
-        //   connected = false;
-        //   isNegotiationNeeded = false;
-        //   return;
-        // }
+          channel.send(JSON.stringify({ type: "streamr", action: "close" }));
+          connection.close();
 
-        // if (action === "init") {
-        //   for (const track of stream.getTracks()) {
-        //     connection.addTrack(track, stream);
-        //   }
+          connection = null;
+          channel = null;
+          iceCandidate = null;
+          connected = false;
+          isNegotiationNeeded = false;
+          return;
+        }
 
-        //   const onConnectionStateChange = (e: any) => {
-        //     self.debug(
-        //       "__WEBRTC.onConnectionStateChange__",
-        //       connection.connectionState
-        //     );
-        //     switch (connection.connectionState) {
-        //       case "connected":
-        //         connected = true;
+        if (action === "init") {
+          for (const track of stream.getTracks()) {
+            connection.addTrack(track, stream);
+          }
 
-        //         (<Window>event.source).postMessage(
-        //           { type: "streamr", action: "connected" },
-        //           event.origin
-        //         );
-        //         break;
-        //       case "disconnected":
-        //         for (let sender of connection.getSenders()) {
-        //           connection.removeTrack(sender);
-        //         }
-        //         canvas = null;
-        //         stream = null;
+          const onConnectionStateChange = (e: any) => {
+            self.debug(
+              "Streamr –> __WEBRTC.onConnectionStateChange__",
+              connection.connectionState
+            );
+            switch (connection.connectionState) {
+              case "connected":
+                connected = true;
 
-        //         (<Window>event.source).postMessage(
-        //           { type: "streamr", action: "disconnected" },
-        //           event.origin
-        //         );
+                (<Window>event.source).postMessage(
+                  { type: "streamr", action: "connected" },
+                  event.origin
+                );
+                break;
+              case "disconnected":
+                for (let sender of connection.getSenders()) {
+                  connection.removeTrack(sender);
+                }
+                canvas = null;
+                stream = null;
 
-        //         channel.close();
-        //         connection.close();
-        //         connection.removeEventListener(
-        //           "connectionstatechange",
-        //           onConnectionStateChange
-        //         );
-        //         connection.removeEventListener(
-        //           "iceconnectionstatechange",
-        //           onIceConnectionStateChange
-        //         );
-        //         connection.removeEventListener("icecandidate", onIceCandidate);
-        //         connection.removeEventListener(
-        //           "onnegotiationneeded",
-        //           onNegotiationNeeded
-        //         );
-        //         connection.removeEventListener(
-        //           "onsignalingstatechange",
-        //           onSignalingStateChange
-        //         );
-        //         channel.removeEventListener("message", onMessage);
+                (<Window>event.source).postMessage(
+                  { type: "streamr", action: "disconnected" },
+                  event.origin
+                );
 
-        //         connection = null;
-        //         channel = null;
-        //         iceCandidate = null;
-        //         connected = false;
+                channel.close();
+                connection.close();
+                connection.removeEventListener(
+                  "connectionstatechange",
+                  onConnectionStateChange
+                );
+                connection.removeEventListener(
+                  "iceconnectionstatechange",
+                  onIceConnectionStateChange
+                );
+                connection.removeEventListener("icecandidate", onIceCandidate);
+                connection.removeEventListener(
+                  "onnegotiationneeded",
+                  onNegotiationNeeded
+                );
+                connection.removeEventListener(
+                  "onsignalingstatechange",
+                  onSignalingStateChange
+                );
+                channel.removeEventListener("message", onMessage);
 
-        //         break;
-        //     }
-        //   };
+                connection = null;
+                channel = null;
+                iceCandidate = null;
+                connected = false;
 
-        //   const onIceConnectionStateChange = (event: any) => {
-        //     self.debug(
-        //       "__WEBRTC.onICEConnectionStateChange__",
-        //       connection.iceConnectionState
-        //     );
-        //     switch (connection.iceConnectionState) {
-        //       case "connected":
-        //         break;
-        //       case "disconnected":
-        //       case "failed":
-        //         connection.restartIce();
-        //         break;
-        //     }
-        //   };
+                break;
+            }
+          };
 
-        //   const onIceCandidate = (e: any) => {
-        //     try {
-        //       self.debug("__WEBRTC.onICECandidate__", e.candidate);
+          const onIceConnectionStateChange = (event: any) => {
+            self.debug(
+              "Streamr –> __WEBRTC.onICEConnectionStateChange__",
+              connection.iceConnectionState
+            );
+            switch (connection.iceConnectionState) {
+              case "connected":
+                break;
+              case "disconnected":
+              case "failed":
+                connection.restartIce();
+                break;
+            }
+          };
 
-        //       if (e.candidate) {
-        //         iceCandidate = e.candidate;
-        //       } else {
-        //         self.debug(
-        //           "__WEBRTC.localDescription__",
-        //           connection.localDescription
-        //         );
+          const onIceCandidate = (e: any) => {
+            try {
+              self.debug("Streamr –> __WEBRTC.onICECandidate__", e.candidate);
 
-        //         (<Window>event.source).postMessage(
-        //           {
-        //             type: "streamr",
-        //             action: "answer",
-        //             offer: window.btoa(
-        //               JSON.stringify(connection.localDescription)
-        //             ),
-        //           },
-        //           event.origin
-        //         );
-        //       }
-        //     } catch (err) {
-        //       console.error("__WEBRTC.onICECandidate__", err.message);
-        //     }
-        //   };
+              if (e.candidate) {
+                iceCandidate = e.candidate;
+              } else {
+                self.debug(
+                  "Streamr –> __WEBRTC.localDescription__",
+                  connection.localDescription
+                );
 
-        //   const onMessage = async (event: any) => {
-        //     try {
-        //       if (!event.data) {
-        //         return;
-        //       }
+                (<Window>event.source).postMessage(
+                  {
+                    type: "streamr",
+                    action: "answer",
+                    offer: window.btoa(
+                      JSON.stringify(connection.localDescription)
+                    ),
+                  },
+                  event.origin
+                );
+              }
+            } catch (err) {
+              console.error("Streamr –> __WEBRTC.onICECandidate__", err.message);
+            }
+          };
 
-        //       const message = JSON.parse(event.data);
+          const onMessage = async (event: any) => {
+            try {
+              if (!event.data) {
+                return;
+              }
 
-        //       if (message.iceCandidate) {
-        //         await connection.addIceCandidate(message.iceCandidate);
-        //         channel.send(JSON.stringify({ iceCandidate }));
-        //       }
-        //     } catch (err) {
-        //       console.error("__WEBRTC.onMessage__", err.message);
-        //     }
-        //   };
+              const message = JSON.parse(event.data);
 
-        //   const onNegotiationNeeded = async (event: any) => {
-        //     try {
-        //       if (isNegotiationNeeded) {
-        //         return;
-        //       }
+              if (message.iceCandidate) {
+                await connection.addIceCandidate(message.iceCandidate);
+                channel.send(JSON.stringify({ iceCandidate }));
+              }
+            } catch (err) {
+              console.error("Streamr –> __WEBRTC.onMessage__", err.message);
+            }
+          };
 
-        //       await connection.setRemoteDescription(JSON.parse(offer));
-        //       await connection.setLocalDescription(
-        //         await connection.createAnswer()
-        //       );
-        //     } catch (err) {
-        //       console.error("__WEBRTC.onNegotiationNeeded", err.message);
-        //     }
-        //   };
+          const onNegotiationNeeded = async (event: any) => {
+            try {
+              if (isNegotiationNeeded) {
+                return;
+              }
 
-        //   const onSignalingStateChange = (e: any) =>
-        //     (isNegotiationNeeded = connection.signalingState !== "stable");
+              await connection.setRemoteDescription(JSON.parse(offer));
+              await connection.setLocalDescription(
+                await connection.createAnswer()
+              );
+            } catch (err) {
+              console.error("Streamr –> __WEBRTC.onNegotiationNeeded", err.message);
+            }
+          };
 
-        //   connection.addEventListener(
-        //     "connectionstatechange",
-        //     onConnectionStateChange
-        //   );
-        //   connection.addEventListener(
-        //     "iceconnectionstatechange",
-        //     onIceConnectionStateChange
-        //   );
-        //   connection.addEventListener("icecandidate", onIceCandidate);
-        //   connection.addEventListener(
-        //     "onnegotiationneeded",
-        //     onNegotiationNeeded
-        //   );
-        //   connection.addEventListener(
-        //     "onsignalingstatechange",
-        //     onSignalingStateChange
-        //   );
-        //   channel.addEventListener("message", onMessage);
+          const onSignalingStateChange = (e: any) =>
+            (isNegotiationNeeded = connection.signalingState !== "stable");
 
-        //   await connection.setRemoteDescription(JSON.parse(offer));
-        //   await connection.setLocalDescription(await connection.createAnswer());
-        // }
+          connection.addEventListener(
+            "connectionstatechange",
+            onConnectionStateChange
+          );
+          connection.addEventListener(
+            "iceconnectionstatechange",
+            onIceConnectionStateChange
+          );
+          connection.addEventListener("icecandidate", onIceCandidate);
+          connection.addEventListener(
+            "onnegotiationneeded",
+            onNegotiationNeeded
+          );
+          connection.addEventListener(
+            "onsignalingstatechange",
+            onSignalingStateChange
+          );
+          channel.addEventListener("message", onMessage);
+
+          await connection.setRemoteDescription(JSON.parse(offer));
+          await connection.setLocalDescription(await connection.createAnswer());
+        }
       } catch (err) {
-        self.debug("__WEBRTC__", err.message);
+        self.debug("Streamr -> __WEBRTC__", err.message);
       }
     });
   }
@@ -553,7 +555,7 @@ if (typeof (<any>window).digitapSDK !== "undefined") {
 (<any>window).digitapSDK = DigitapGamePlayerSDK.processQueue;
 
 // Force the logs to be hidden
-const log = window.console.log;
-window.console.log = function (...args: any) {
-  return true;
-};
+// const log = window.console.log;
+// window.console.log = function (...args: any) {
+//   return true;
+// };
