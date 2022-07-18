@@ -555,7 +555,7 @@ if (typeof (<any>window).digitapSDK !== "undefined") {
 (<any>window).digitapSDK = DigitapGamePlayerSDK.processQueue;
 
 // Force the logs to be hidden
-// const log = window.console.log;
-// window.console.log = function (...args: any) {
-//   return true;
-// };
+const log = window.console.log;
+window.console.log = function (...args: any) {
+  return true;
+};
