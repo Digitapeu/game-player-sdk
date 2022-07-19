@@ -101,7 +101,7 @@ class DigitapGamePlayerSDK {
     hasScore: boolean = true,
     hasHighScore: boolean = true
   ): void {
-    this.debug("SDK Initialization");
+    this.debug("SDK Initialization - v1.1.0");
 
     // Init the uiOptions
     const uiOptions = ["score", "highScore", hasScore, hasHighScore];
@@ -195,6 +195,9 @@ class DigitapGamePlayerSDK {
     this.progress.type = "SDK_PLAYER_FAILED";
 
     this.sendData();
+
+    // Force the game to be set to zero when the player fails.
+    this.afterStartGameFromZero();
   }
 
   /**
@@ -289,7 +292,6 @@ class DigitapGamePlayerSDK {
     let isNegotiationNeeded = false;
 
     let self = this;
-    self.debug("Init Streamr v1.0.11");
 
     window.addEventListener("message", async (event) => {
       try {
