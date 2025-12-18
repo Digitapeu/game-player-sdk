@@ -497,9 +497,9 @@ BACKEND VALIDATION:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        FEATURE COVERAGE BY DOCUMENT                      │
+│                        FEATURE COVERAGE BY DOCUMENT                     │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
+│                                                                         │
 │  Server-paced nonces      ████████████████ GPT only                     │
 │  Rolling hash             ████████████████ All                          │
 │  DPoP checkpoints         ████████████████ All                          │
@@ -516,7 +516,7 @@ BACKEND VALIDATION:
 │  Minimal payloads         ████░░░░░░░░░░░░ Opus only                    │
 │  Edge case handling       ████████░░░░░░░░ Composer best                │
 │  Endpoint contracts       ████████░░░░░░░░ GPT, Sonnet                  │
-│                                                                          │
+│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
