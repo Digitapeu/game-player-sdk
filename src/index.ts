@@ -1,42 +1,54 @@
-type Progress = {
-  controller: string;
-  type: string;
-  score: number;
-  level: number;
-  state: any;
-  continueScore: number;
-};
+/**
+ * WAM Game Player SDK
+ * 
+ * A JavaScript/TypeScript SDK that integrates HTML5 games with WAM platforms.
+ * 
+ * Public API (FROZEN - DO NOT CHANGE):
+ *   digitapSDK('init', hasScore, hasHighScore)
+ *   digitapSDK('setCallback', fn, callback)
+ *   digitapSDK('setProgress', state, score, level)
+ *   digitapSDK('setLevelUp', level)
+ *   digitapSDK('setPlayerFailed', state)
+ * 
+ * @version 2.0.0
+ */
 
-interface CanvasElement extends HTMLCanvasElement {
-  captureStream(frameRate?: number): MediaStream;
-}
+import type { Progress, CanvasElement } from './types';
+import { SecurityBridge, log } from './security';
+
+// ============================================================
+// Security Bridge Singleton
+// ============================================================
+
+const ALLOWED_ORIGINS = [
+  'https://wam.app',
+  'https://app.wam.app',
+  'https://wam.eu',
+  'https://win.wam.app',
+  'https://play.wam.app',
+];
+const securityBridge = new SecurityBridge();
+
+// ============================================================
+// Main SDK Class
+// ============================================================
 
 class DigitapGamePlayerSDK {
   public static gameObject: any = null;
-  private static isLoaded: boolean = false;
-  private static origin: string = null;
-  private static isDebugging: boolean = false;
+  private static _isLoaded: boolean = false;
+  private static _isConnected: boolean = false;
+  private static _origin: string | null = null;
+  private static _initRetryCount: number = 0;
+  private static _initRetryInterval: number | null = null;
 
-  private static allowedOrigins: string[] = [
-    "https://build.digitap.dev",
-    "https://wam.app",
-    "https://app.wam.app",
-    "https://wam.eu",
-    "https://play.wam.app",
-    "https://stage.wam.app",
-    "https://stage2.wam.app",
-    "http://localhost:63342",
-    "http://localhost:8080",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://localhost:3001",
-    "http://127.0.0.1:3001",
-    "https://127.0.0.1:3001",
-  ];
+  private static readonly _MAX_INIT_RETRIES = 10;
+  private static readonly _INIT_RETRY_DELAY_MS = 500;
 
-  private static progress: Progress = {
-    controller: "_digitapGame",
-    type: "SDK_PLAYER_SCORE_UPDATE",
+  private static _allowedOrigins: string[] = ALLOWED_ORIGINS;;
+
+  private static _progress: Progress = {
+    controller: '_digitapGame',
+    type: 'SDK_PLAYER_SCORE_UPDATE',
     score: 0,
     level: 0,
     state: null,
@@ -44,32 +56,29 @@ class DigitapGamePlayerSDK {
   };
 
   /**
-   * Call a method from the class,
-   * through a queue.
-   *
-   * @param args array
+   * Call a method from the class through a queue.
    */
   public static processQueue(...args: any[]): void {
-    DigitapGamePlayerSDK.debug("Processing Queue ->", args);
+    if (typeof args[0] === 'string') {
+      const methodName = args[0] as
+        | 'init'
+        | 'setProgress'
+        | 'setLevelUp'
+        | 'setPlayerFailed'
+        | 'setCallback';
 
-    if (typeof args[0] === "string") {
-      DigitapGamePlayerSDK[
-        args[0] as
-          | "init"
-          | "setProgress"
-          | "setLevelUp"
-          | "setPlayerFailed"
-          | "setCallback"
-      ].apply(DigitapGamePlayerSDK, args.slice(1));
+      const method = DigitapGamePlayerSDK[methodName] as (...args: any[]) => void;
+      if (method) {
+        method.apply(DigitapGamePlayerSDK, args.slice(1));
+      }
     }
   }
 
   /**
    * Process a current queue.
-   *
-   * @param queue array
    */
-  public static processOldQueue(queue: []): void {
+  public static processOldQueue(queue: any[]): void {
+    if (!queue || !Array.isArray(queue)) return;
     queue.forEach((args: any) => {
       this.processQueue(...args);
     });
@@ -77,202 +86,246 @@ class DigitapGamePlayerSDK {
 
   /**
    * Sets a callback method.
-   *
-   * @param fn string
-   * @param callback function
    */
   public static setCallback(
     fn:
-      | "afterStartGameFromZero"
-      | "afterContinueWithCurrentScore"
-      | "afterStartGame"
-      | "afterPauseGame",
+      | 'afterStartGameFromZero'
+      | 'afterContinueWithCurrentScore'
+      | 'afterStartGame'
+      | 'afterPauseGame',
     callback: any
   ): void {
-    this[fn] = callback;
+    (this as any)[fn] = callback;
   }
 
   /**
-   * Init a new game connection with
-   * the parent platform.
-   *
-   * @param uiOptions array
+   * Init a new game connection with the parent platform.
    */
   public static init(
     hasScore: boolean = true,
     hasHighScore: boolean = true
   ): void {
-    this.debug("SDK Initialization - v1.1.0");
-
-    // Init the uiOptions
-    const uiOptions = ["score", "highScore", hasScore, hasHighScore];
-
+    log.info('🎮 DigitapSDK.init() called', { hasScore, hasHighScore });
+    
     // If SDK is not loaded yet
-    if (!this.isLoaded) {
+    if (!this._isLoaded) {
+      // Security bridge is already initialized on script load
+      
+      // Init the uiOptions
+      const uiOptions = ['score', 'highScore', hasScore, hasHighScore];
+
       // Send the init message
+      log.info('Sending SDK_SETTINGS to parent', { uiOptions });
       window.parent.postMessage(
         {
-          controller: "_digitapGame",
-          type: "SDK_SETTINGS",
+          controller: '_digitapGame',
+          type: 'SDK_SETTINGS',
           ui: uiOptions,
           ready: true,
         },
-        "*"
+        '*'
       );
 
       // Watch for messages from GameBox
-      this.listenGameboxEvents();
+      this._listenGameboxEvents();
+      log.info('✓ Listening for GameBox events');
 
       // Watch for messages from Streamr
-      this.listenStreamrEvents();
+      this._listenStreamrEvents();
+      log.info('✓ Listening for Streamr events');
 
       // Set the canvas fullwidth & blue screen fix
-      const canvas: HTMLCollection = document.getElementsByTagName("canvas");
-      const html: HTMLCollection = document.getElementsByTagName("html");
+      const canvas: HTMLCollection = document.getElementsByTagName('canvas');
+      const html: HTMLCollection = document.getElementsByTagName('html');
 
       setTimeout(() => {
-        let canvasStyle = canvas[0].getAttribute("style");
-        canvas[0].setAttribute(
-          "style",
-          canvasStyle +
-            "width: 100%; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none;"
-        );
+        if (canvas[0]) {
+          const canvasStyle = canvas[0].getAttribute('style') || '';
+          canvas[0].setAttribute(
+            'style',
+            canvasStyle +
+              'width: 100%; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none;'
+          );
+          log.info('✓ Applied canvas styles');
+        }
 
-        let htmlStyle = html[0].getAttribute("style");
-        html[0].setAttribute(
-          "style",
-          (htmlStyle ? htmlStyle : "") +
-            "user-select: none; -webkit-user-select: none; -moz-user-select: none;"
-        );
+        if (html[0]) {
+          const htmlStyle = html[0].getAttribute('style') || '';
+          html[0].setAttribute(
+            'style',
+            htmlStyle +
+              'user-select: none; -webkit-user-select: none; -moz-user-select: none;'
+          );
+          log.info('✓ Applied html styles');
+        }
       }, 2000);
+    } else {
+      log.warn('SDK already initialized, skipping');
     }
 
     // Set SDK as loaded to prevent re-initiation
-    this.isLoaded = true;
+    this._isLoaded = true;
+    log.info('🎮 DigitapSDK ready!');
   }
 
   /**
    * Set progress of a game.
-   *
-   * @param type string
-   * @param state string
-   * @param score number
-   * @param level number
+   * Computes stateHash from input events and canvas state for integrity verification.
    */
   public static setProgress(state: string, score: number, level: number): void {
-    // Set the current progress
-    this.progress = {
-      type: "SDK_PLAYER_SCORE_UPDATE",
+    log.info(`setProgress: state=${state}, score=${score}, level=${level}`);
+    
+    // Compute stateHash for cryptographic evidence
+    // This ties the score to input events and game visual state
+    const stateHash = securityBridge.computeStateHash(score);
+    
+    // Set the current progress with stateHash
+    this._progress = {
+      type: 'SDK_PLAYER_SCORE_UPDATE',
       state,
       score,
       level,
       continueScore: score,
-      controller: "_digitapGame",
+      controller: '_digitapGame',
+      stateHash,  // ✅ Now included!
     };
 
-    this.sendData();
+    this._sendData();
   }
 
   /**
    * Set the new level of the game.
-   *
-   * @param level number
+   * Computes stateHash to prove level advancement was legitimate.
    */
   public static setLevelUp(level: number): void {
-    this.progress.level = level;
-    this.progress.type = "SDK_PLAYER_LEVEL_UP";
+    log.info(`setLevelUp: level=${level}`);
+    
+    // Compute stateHash at moment of level up
+    const stateHash = securityBridge.computeStateHash(this._progress.score);
+    
+    this._progress.level = level;
+    this._progress.type = 'SDK_PLAYER_LEVEL_UP';
+    this._progress.stateHash = stateHash;
 
-    this.sendData();
+    this._sendData();
   }
 
   /**
-   * Set the game as failed.
-   *
-   * @param state string
+   * Set the game as failed (player death).
+   * Computes stateHash from input events and canvas state at death moment.
    */
-  public static setPlayerFailed(state: string = "FAIL"): void {
-    this.progress.state = state;
-    this.progress.score = 0;
-    this.progress.type = "SDK_PLAYER_FAILED";
+  public static setPlayerFailed(state: string = 'FAIL'): void {
+    log.info(`setPlayerFailed: state=${state}`);
+    
+    // Capture score BEFORE setting to 0 for stateHash computation
+    const scoreAtDeath = this._progress.score;
+    
+    // Compute stateHash at moment of death
+    // This proves the death was legitimate (not fabricated)
+    const stateHash = securityBridge.computeStateHash(scoreAtDeath);
+    
+    this._progress.state = state;
+    this._progress.score = 0;
+    this._progress.type = 'SDK_PLAYER_FAILED';
+    this._progress.stateHash = stateHash;
+    this._progress.continueScore = scoreAtDeath; // Preserve for potential revive
 
-    this.sendData();
+    this._sendData();
 
-    // Force the game to be set to zero when the player fails.
+    // Force the game to be set to zero when the player fails
     this.afterStartGameFromZero();
   }
 
   /**
    * Sends game data to parent platform.
    */
-  private static sendData(): void {
-    // Send the message to Gamebox.
-    window.parent.postMessage(this.progress, this.origin);
+  private static _sendData(): void {
+    log.info(`Sending to parent: ${this._progress.type}`, this._progress);
+    window.parent.postMessage(this._progress, this._origin ?? '*');
   }
 
   /**
-   * Start listening for messages
-   * from the platform.
+   * Start listening for game commands from GameBox (parent only).
    */
-  private static listenGameboxEvents(): void {
+  private static _listenGameboxEvents(): void {
     const self = this;
 
     window.addEventListener(
-      "message",
+      'message',
       function (event) {
-        DigitapGamePlayerSDK.debug("Event Received -> %o -> %o", event.data, event.origin);
+        // STRICT FILTER 1: Only accept messages from parent window (GameBox)
+        if (event.source !== window.parent) {
+          return; // Silently ignore - not from GameBox
+        }
 
-        if (
-          typeof event.data == "object" &&
-          event.data.controller &&
-          event.data.controller == "_digitapApp"
-        ) {
-          let originIndex = self.allowedOrigins.indexOf(event.origin);
+        // STRICT FILTER 2: Must be a valid object with controller
+        const data = event.data;
+        if (!data || typeof data !== 'object' || data.controller !== '_digitapApp') {
+          return; // Silently ignore - not our protocol
+        }
 
-          if (originIndex === -1) {
-            DigitapGamePlayerSDK.debug("Error: Origin not allowed inside game container!");
-            return;
-          } else {
-            self.origin = self.allowedOrigins[originIndex];
-          }
+        // STRICT FILTER 3: Must have a valid type (support both NEW and OLD protocols)
+        const validTypes = [
+          // NEW protocol (SDK v2+)
+          'SDK_START_GAME',
+          'SDK_PAUSE_GAME', 
+          'SDK_START_GAME_FROM_ZERO',
+          'SDK_CONTINUE_WITH_CURRENT_SCORE',
+          // OLD protocol (SDK v1.0.0 backward compatibility)
+          'startGame',
+          'startGameFromZero',
+          'continueWithCurrentScore'
+        ];
+        if (!data.type || !validTypes.includes(data.type)) {
+          return; // Silently ignore - unknown command
+        }
 
-          if (event.data.type) {
-            switch (event.data.type) {
-              case "SDK_START_GAME":
-                self.afterStartGame();
-                break;
+        // Validate origin
+        const originIndex = self._allowedOrigins.indexOf(event.origin);
+        if (originIndex === -1) {
+          log.warn(`GameBox message from unauthorized origin: ${event.origin}`);
+          return;
+        }
+        self._origin = self._allowedOrigins[originIndex];
 
-              case "SDK_PAUSE_GAME":
-                self.afterPauseGame();
-                break;
+        log.event(`GameBox → SDK: ${data.type}`, { origin: event.origin });
+        
+        switch (data.type) {
+          // NEW protocol
+          case 'SDK_START_GAME':
+          // OLD protocol (backward compat)
+          case 'startGame':
+            log.info('📢 Calling afterStartGame()');
+            self.afterStartGame();
+            break;
 
-              case "SDK_START_GAME_FROM_ZERO":
-                self.progress.score = 0;
-                self.progress.level = 0;
-                self.progress.continueScore = 0;
+          case 'SDK_PAUSE_GAME':
+            log.info('📢 Calling afterPauseGame()');
+            self.afterPauseGame();
+            break;
 
-                self.afterStartGameFromZero();
-                break;
+          // NEW protocol
+          case 'SDK_START_GAME_FROM_ZERO':
+          // OLD protocol (backward compat)
+          case 'startGameFromZero':
+            log.info('📢 Resetting progress and calling afterStartGameFromZero()');
+            self._progress.score = 0;
+            self._progress.level = 0;
+            self._progress.continueScore = 0;
+            self.afterStartGameFromZero();
+            break;
 
-              case "SDK_CONTINUE_WITH_CURRENT_SCORE":
-                self.progress.score = self.progress.continueScore;
-
-                self.afterContinueWithCurrentScore(
-                  self.progress.score,
-                  self.progress.level
-                );
-                break;
-
-              default:
-                DigitapGamePlayerSDK.debug(
-                  'Error: `data.type` = "' +
-                    event.data.type +
-                    '" not found! Please check `readme.md` of data collector package!'
-                );
-                break;
-            }
-          } else {
-            DigitapGamePlayerSDK.debug("Error: `event.data.type` should be implemented!");
-          }
+          // NEW protocol
+          case 'SDK_CONTINUE_WITH_CURRENT_SCORE':
+          // OLD protocol (backward compat)
+          case 'continueWithCurrentScore':
+            log.info(`📢 Continuing with score=${self._progress.continueScore}, level=${self._progress.level}`);
+            self._progress.score = self._progress.continueScore;
+            self.afterContinueWithCurrentScore(
+              self._progress.score,
+              self._progress.level
+            );
+            break;
         }
       },
       false
@@ -280,52 +333,44 @@ class DigitapGamePlayerSDK {
   }
 
   /**
-   * Start listening for messages
-   * from the Streamr platform.
+   * Start listening for WebRTC messages from the Streamr platform.
    */
-  private static listenStreamrEvents(): void {
-    let canvas: CanvasElement = null;
-    let stream: any = null;
-    let connection: any = null;
-    let channel: any = null;
-    let iceCandidate: any = null;
+  private static _listenStreamrEvents(): void {
+    let canvas: CanvasElement | null = null;
+    let stream: MediaStream | null = null;
+    let connection: RTCPeerConnection | null = null;
+    let channel: RTCDataChannel | null = null;
+    let iceCandidate: RTCIceCandidate | null = null;
     let connected = false;
     let isNegotiationNeeded = false;
 
-    let self = this;
+    const self = this;
 
-    window.addEventListener("message", async (event) => {
+    window.addEventListener('message', async (event) => {
       try {
-        DigitapGamePlayerSDK.debug("Streamr Event received", event.data);
+        // STRICT FILTER: Only accept messages from parent window (GameBox)
+        if (event.source !== window.parent) {
+          return; // Silently ignore - not from GameBox
+        }
 
-        if (!event.data || typeof event.data !== "object") {
+        if (!event.data || typeof event.data !== 'object') {
           return;
         }
 
         const { controller, type, action, offer, tournament_id, username } =
           event.data;
 
-        DigitapGamePlayerSDK.debug(
-          "Streamr Event details: ",
-          controller,
-          type,
-          action,
-          offer,
-          tournament_id,
-          username
-        );
-
-        if (controller !== "_digitapApp" || type !== "webrtc") {
+        if (controller !== '_digitapApp' || type !== 'webrtc') {
           return;
         }
 
-        DigitapGamePlayerSDK.debug("Streamr –> Passed validation");
-
         if (!connected) {
-          canvas = <CanvasElement>document.querySelector("canvas");
+          canvas = document.querySelector('canvas') as CanvasElement;
+          if (!canvas) return;
+          
           stream = canvas.captureStream(30);
           connection = new RTCPeerConnection({
-            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
           });
           channel = connection.createDataChannel(
             `streamr-${tournament_id}-${username}`,
@@ -336,16 +381,22 @@ class DigitapGamePlayerSDK {
           );
         }
 
-        if (action === "close") {
-          for (let sender of connection.getSenders()) {
-            connection.removeTrack(sender);
+        if (action === 'close') {
+          if (connection) {
+            for (const sender of connection.getSenders()) {
+              connection.removeTrack(sender);
+            }
           }
 
           canvas = null;
           stream = null;
 
-          channel.send(JSON.stringify({ type: "streamr", action: "close" }));
-          connection.close();
+          if (channel) {
+            channel.send(JSON.stringify({ type: 'streamr', action: 'close' }));
+          }
+          if (connection) {
+            connection.close();
+          }
 
           connection = null;
           channel = null;
@@ -355,98 +406,91 @@ class DigitapGamePlayerSDK {
           return;
         }
 
-        if (action === "init") {
+        if (action === 'init' && stream && connection && channel) {
           for (const track of stream.getTracks()) {
             connection.addTrack(track, stream);
           }
 
-          const onConnectionStateChange = (e: any) => {
-            self.debug(
-              "Streamr –> __WEBRTC.onConnectionStateChange__",
-              connection.connectionState
-            );
+          const onConnectionStateChange = () => {
+            if (!connection) return;
+            
             switch (connection.connectionState) {
-              case "connected":
+              case 'connected':
                 connected = true;
-
-                (<Window>event.source).postMessage(
-                  { type: "streamr", action: "connected" },
+                (event.source as Window).postMessage(
+                  { type: 'streamr', action: 'connected' },
                   event.origin
                 );
                 break;
-              case "disconnected":
-                for (let sender of connection.getSenders()) {
-                  connection.removeTrack(sender);
+              case 'disconnected':
+                if (connection) {
+                  for (const sender of connection.getSenders()) {
+                    connection.removeTrack(sender);
+                  }
                 }
                 canvas = null;
                 stream = null;
 
-                (<Window>event.source).postMessage(
-                  { type: "streamr", action: "disconnected" },
+                (event.source as Window).postMessage(
+                  { type: 'streamr', action: 'disconnected' },
                   event.origin
                 );
 
-                channel.close();
-                connection.close();
-                connection.removeEventListener(
-                  "connectionstatechange",
-                  onConnectionStateChange
-                );
-                connection.removeEventListener(
-                  "iceconnectionstatechange",
-                  onIceConnectionStateChange
-                );
-                connection.removeEventListener("icecandidate", onIceCandidate);
-                connection.removeEventListener(
-                  "onnegotiationneeded",
-                  onNegotiationNeeded
-                );
-                connection.removeEventListener(
-                  "onsignalingstatechange",
-                  onSignalingStateChange
-                );
-                channel.removeEventListener("message", onMessage);
+                if (channel) channel.close();
+                if (connection) {
+                  connection.close();
+                  connection.removeEventListener(
+                    'connectionstatechange',
+                    onConnectionStateChange
+                  );
+                  connection.removeEventListener(
+                    'iceconnectionstatechange',
+                    onIceConnectionStateChange
+                  );
+                  connection.removeEventListener('icecandidate', onIceCandidate);
+                  connection.removeEventListener(
+                    'negotiationneeded',
+                    onNegotiationNeeded
+                  );
+                  connection.removeEventListener(
+                    'signalingstatechange',
+                    onSignalingStateChange
+                  );
+                }
+                if (channel) {
+                  channel.removeEventListener('message', onMessage);
+                }
 
                 connection = null;
                 channel = null;
                 iceCandidate = null;
                 connected = false;
-
                 break;
             }
           };
 
-          const onIceConnectionStateChange = (event: any) => {
-            self.debug(
-              "Streamr –> __WEBRTC.onICEConnectionStateChange__",
-              connection.iceConnectionState
-            );
+          const onIceConnectionStateChange = () => {
+            if (!connection) return;
+            
             switch (connection.iceConnectionState) {
-              case "connected":
+              case 'connected':
                 break;
-              case "disconnected":
-              case "failed":
+              case 'disconnected':
+              case 'failed':
                 connection.restartIce();
                 break;
             }
           };
 
-          const onIceCandidate = (e: any) => {
+          const onIceCandidate = (e: RTCPeerConnectionIceEvent) => {
             try {
-              self.debug("Streamr –> __WEBRTC.onICECandidate__", e.candidate);
-
               if (e.candidate) {
                 iceCandidate = e.candidate;
-              } else {
-                self.debug(
-                  "Streamr –> __WEBRTC.localDescription__",
-                  connection.localDescription
-                );
-
-                (<Window>event.source).postMessage(
+              } else if (connection) {
+                (event.source as Window).postMessage(
                   {
-                    type: "streamr",
-                    action: "answer",
+                    type: 'streamr',
+                    action: 'answer',
                     offer: window.btoa(
                       JSON.stringify(connection.localDescription)
                     ),
@@ -454,31 +498,31 @@ class DigitapGamePlayerSDK {
                   event.origin
                 );
               }
-            } catch (err) {
-              console.error("Streamr –> __WEBRTC.onICECandidate__", err.message);
+            } catch {
+              // Ignore errors
             }
           };
 
-          const onMessage = async (event: any) => {
+          const onMessage = async (messageEvent: MessageEvent) => {
             try {
-              if (!event.data) {
+              if (!messageEvent.data || !connection || !channel) {
                 return;
               }
 
-              const message = JSON.parse(event.data);
+              const message = JSON.parse(messageEvent.data);
 
               if (message.iceCandidate) {
                 await connection.addIceCandidate(message.iceCandidate);
                 channel.send(JSON.stringify({ iceCandidate }));
               }
-            } catch (err) {
-              console.error("Streamr –> __WEBRTC.onMessage__", err.message);
+            } catch {
+              // Ignore errors
             }
           };
 
-          const onNegotiationNeeded = async (event: any) => {
+          const onNegotiationNeeded = async () => {
             try {
-              if (isNegotiationNeeded) {
+              if (isNegotiationNeeded || !connection) {
                 return;
               }
 
@@ -486,79 +530,262 @@ class DigitapGamePlayerSDK {
               await connection.setLocalDescription(
                 await connection.createAnswer()
               );
-            } catch (err) {
-              console.error("Streamr –> __WEBRTC.onNegotiationNeeded", err.message);
+            } catch {
+              // Ignore errors
             }
           };
 
-          const onSignalingStateChange = (e: any) =>
-            (isNegotiationNeeded = connection.signalingState !== "stable");
+          const onSignalingStateChange = () => {
+            if (connection) {
+              isNegotiationNeeded = connection.signalingState !== 'stable';
+            }
+          };
 
           connection.addEventListener(
-            "connectionstatechange",
+            'connectionstatechange',
             onConnectionStateChange
           );
           connection.addEventListener(
-            "iceconnectionstatechange",
+            'iceconnectionstatechange',
             onIceConnectionStateChange
           );
-          connection.addEventListener("icecandidate", onIceCandidate);
+          connection.addEventListener('icecandidate', onIceCandidate);
           connection.addEventListener(
-            "onnegotiationneeded",
+            'negotiationneeded',
             onNegotiationNeeded
           );
           connection.addEventListener(
-            "onsignalingstatechange",
+            'signalingstatechange',
             onSignalingStateChange
           );
-          channel.addEventListener("message", onMessage);
+          channel.addEventListener('message', onMessage);
 
           await connection.setRemoteDescription(JSON.parse(offer));
           await connection.setLocalDescription(await connection.createAnswer());
         }
-      } catch (err) {
-        self.debug("Streamr -> __WEBRTC__", err.message);
+      } catch {
+        // Ignore errors
       }
     });
   }
 
   /**
-   * Empty methods for game developer to use.
+   * Callback methods for game developer to use.
    */
   public static afterStartGameFromZero() {}
 
-  public static afterContinueWithCurrentScore(score: number, level: number) {}
+  public static afterContinueWithCurrentScore(_score: number, _level: number) {}
 
   public static afterStartGame() {}
 
   public static afterPauseGame() {}
-
-  /**
-   * If user is debugging, show some console logs.
-   *
-   * @param message any
-   * @param params any[]
-   */
-  private static debug(message?: any, ...params: any[]): void {
-    const parentWindow: any = window;
-
-    // if (parentWindow.sdkdebug) {
-      console.log("DigitapGamePlayerSDK -> " + message, ...params);
-    // }
-  }
 }
 
+// ============================================================
+// GLOBAL MESSAGE LISTENER - Attached IMMEDIATELY on script load
+// Only logs messages from GameBox (parent) with valid protocol structure
+// ============================================================
+
+(function attachGlobalListener() {
+  if (typeof window === 'undefined') return;
+  
+  log.info('🔌 SDK script loaded - attaching global message listener');
+  
+  window.addEventListener('message', (event) => {
+    // STRICT FILTER: Only accept messages from parent window (GameBox)
+    if (event.source !== window.parent) {
+      return; // Silently ignore - not from GameBox
+    }
+    
+    // STRICT FILTER: Must be an object with our protocol structure
+    const data = event.data;
+    if (!data || typeof data !== 'object') {
+      return; // Silently ignore - malformed
+    }
+    
+    // STRICT FILTER: Must have a valid controller from our protocol
+    const controller = data.controller;
+    if (controller !== '_digitapApp' && controller !== '_digitapSecurity') {
+      return; // Silently ignore - not our protocol (e.g. MetaMask, extensions)
+    }
+    
+    // This is a valid GameBox message - log it
+    log.info('📩 GameBox message received:', {
+      origin: event.origin,
+      controller: controller,
+      type: data.type
+    });
+  });
+  
+  // Notify parent immediately that SDK script is loaded
+  // This happens BEFORE the game calls init()
+  try {
+    window.parent.postMessage({
+      controller: '_digitapSecurity',
+      type: 'SDK_LOADED',
+      ts: Date.now()
+    }, '*');
+    log.info('📤 Sent SDK_LOADED beacon to parent');
+  } catch (e) {
+    log.error('Failed to send SDK_LOADED beacon', e);
+  }
+})();
+
+// ============================================================
+// Initialize Security Bridge IMMEDIATELY (don't wait for game init)
+// ============================================================
+
+securityBridge.init();
+
+// ============================================================
+// BACKWARD COMPATIBILITY: _digitapUser (SDK v1.0.0 API)
+// ============================================================
+// Games written for the old SDK use _digitapUser directly.
+// This shim exposes the old API while internally using the new SDK.
+
+interface LegacyProgress {
+  controller: string;
+  type: string;
+  score: number;
+  state: string | null;
+  continueScore: number;
+  level?: number;
+}
+
+interface LegacyDigitapUser {
+  gameObject: any;
+  isLoaded: boolean;
+  origin: string | null;
+  allowedOrigins: string[];
+  progress: LegacyProgress;
+  extra: { multiplier: number };
+  sendData: (gameObject?: any) => void;
+  init: (uiOptions?: string[]) => void;
+  _afterStartGameFromZero: () => void;
+  _afterContinueWithCurrentScore: () => void;
+  _afterStartGame: () => void;
+}
+
+const _digitapUser: LegacyDigitapUser = {
+  gameObject: null,
+  isLoaded: false,
+  origin: null,
+  allowedOrigins: ALLOWED_ORIGINS,
+  progress: {
+    controller: '_digitapGame',
+    type: 'progress',
+    score: 0,
+    state: null,
+    continueScore: 0,
+    level: 0,
+  },
+  extra: {
+    multiplier: 1,
+  },
+
+  /**
+   * Send game data to parent platform (OLD API).
+   * Forwards to new SDK's setProgress internally.
+   */
+  sendData: function (gameObject?: any) {
+    if (typeof gameObject !== 'undefined') {
+      this.gameObject = gameObject;
+    }
+    this.progress.continueScore = this.progress.score;
+
+    // Forward to new SDK with security features
+    DigitapGamePlayerSDK.setProgress(
+      this.progress.state ?? 'PLAY',
+      this.progress.score,
+      this.progress.level ?? 0
+    );
+  },
+
+  /**
+   * Initialize the SDK (OLD API).
+   * Games call: _digitapUser.init(['sound', 'background'])
+   */
+  init: function (uiOptions?: string[]) {
+    log.info('🔄 _digitapUser.init() called (legacy API)', { uiOptions });
+
+    if (!this.isLoaded) {
+      // Send OLD-style settings message for backward compat
+      window.parent.postMessage(
+        {
+          controller: '_digitapGame',
+          type: 'settings', // OLD protocol uses 'settings'
+          ui: uiOptions,
+          ready: true,
+        },
+        '*'
+      );
+
+      // Also send NEW-style settings (in case GameBox expects it)
+      window.parent.postMessage(
+        {
+          controller: '_digitapGame',
+          type: 'SDK_SETTINGS',
+          ui: uiOptions,
+          ready: true,
+        },
+        '*'
+      );
+    }
+
+    this.isLoaded = true;
+
+    // Initialize new SDK internally (without sending duplicate messages)
+    if (!(DigitapGamePlayerSDK as any)._isLoaded) {
+      (DigitapGamePlayerSDK as any)._isLoaded = true;
+      (DigitapGamePlayerSDK as any)._listenGameboxEvents();
+      (DigitapGamePlayerSDK as any)._listenStreamrEvents();
+    }
+  },
+
+  // Hookable methods - games OVERRIDE these
+  _afterStartGameFromZero: function () {
+    // Games override this: _digitapUser._afterStartGameFromZero = function() { ... }
+  },
+  _afterContinueWithCurrentScore: function () {
+    // Games override this: _digitapUser._afterContinueWithCurrentScore = function() { ... }
+  },
+  _afterStartGame: function () {
+    // Games override this: _digitapUser._afterStartGame = function() { ... }
+  },
+};
+
+// Wire up new SDK callbacks to legacy hooks
+DigitapGamePlayerSDK.afterStartGameFromZero = function () {
+  log.info('🔄 Forwarding afterStartGameFromZero to legacy _digitapUser');
+  _digitapUser.progress.score = 0;
+  _digitapUser.progress.continueScore = 0;
+  _digitapUser._afterStartGameFromZero();
+};
+
+DigitapGamePlayerSDK.afterContinueWithCurrentScore = function (score: number, level: number) {
+  log.info('🔄 Forwarding afterContinueWithCurrentScore to legacy _digitapUser', { score, level });
+  _digitapUser.progress.score = _digitapUser.progress.continueScore;
+  _digitapUser._afterContinueWithCurrentScore();
+};
+
+DigitapGamePlayerSDK.afterStartGame = function () {
+  log.info('🔄 Forwarding afterStartGame to legacy _digitapUser');
+  _digitapUser._afterStartGame();
+};
+
+// Expose _digitapUser globally for legacy games
+(window as any)._digitapUser = _digitapUser;
+log.info('✓ Legacy _digitapUser API exposed globally');
+
+// ============================================================
+// Initialize SDK
+// ============================================================
+
 // Read the current queue
-if (typeof (<any>window).digitapSDK !== "undefined") {
-  let oldQueue = (<any>window).digitapSDK.q;
+if (typeof (window as any).digitapSDK !== 'undefined') {
+  const oldQueue = (window as any).digitapSDK.q;
   DigitapGamePlayerSDK.processOldQueue(oldQueue);
 }
 
 // Watch the queue with new method
-(<any>window).digitapSDK = DigitapGamePlayerSDK.processQueue;
-
-// Force the logs to be hidden
-const log = window.console.log;
-window.console.log = function (...args: any) {
-  return true;
-};
+(window as any).digitapSDK = DigitapGamePlayerSDK.processQueue;
