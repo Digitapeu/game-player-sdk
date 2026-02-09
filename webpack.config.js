@@ -21,7 +21,7 @@ module.exports = (env, argv) => {
       extensions: ['.tsx', '.ts', '.js'],
     },
     output: {
-      filename: 'main.min.js',
+      filename: 'main.min.4.js',
       path: path.resolve(__dirname, 'dist'),
     },
     optimization: {
@@ -87,7 +87,7 @@ module.exports = (env, argv) => {
               domainLock: [
                 '.wam.app', // Wildcard for all subdomains
                 'wam.eu',
-                'digitap.dev',
+                'digitap.eu',
                 'localhost',
                 '127.0.0.1',
               ],

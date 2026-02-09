@@ -39,12 +39,88 @@ class DigitapGamePlayerSDK {
   private static _isConnected: boolean = false;
   private static _origin: string | null = null;
   private static _initRetryCount: number = 0;
-  private static _initRetryInterval: number | null = null;
+  private static _initRetryInterval: ReturnType<typeof setInterval> | null = null;
 
   private static readonly _MAX_INIT_RETRIES = 10;
   private static readonly _INIT_RETRY_DELAY_MS = 500;
 
-  private static _allowedOrigins: string[] = ALLOWED_ORIGINS;;
+  private static _allowedOrigins: string[] = ALLOWED_ORIGINS;
+
+  /**
+   * Start the connection handshake with GameBox.
+   * Sends SDK_LOADED beacon and retries until GameBox responds with SDK_SESSION_INIT.
+   */
+  private static _startConnectionHandshake(): void {
+    if (this._isConnected) {
+      log.info('Already connected to GameBox');
+      return;
+    }
+
+    // Register callback for when session is initialized
+    securityBridge.onSessionInit(() => {
+      this._isConnected = true;
+      this._initRetryCount = 0;
+      
+      if (this._initRetryInterval !== null) {
+        clearInterval(this._initRetryInterval);
+        this._initRetryInterval = null;
+      }
+      
+      log.info('✅ Connected to GameBox (session initialized)');
+    });
+
+    // Send initial beacon
+    this._sendLoadedBeacon();
+
+    // Start retry interval
+    this._initRetryInterval = setInterval(() => {
+      if (this._isConnected) {
+        // Connected, stop retrying
+        if (this._initRetryInterval !== null) {
+          clearInterval(this._initRetryInterval);
+          this._initRetryInterval = null;
+        }
+        return;
+      }
+
+      this._initRetryCount++;
+
+      if (this._initRetryCount >= this._MAX_INIT_RETRIES) {
+        // Max retries reached, stop trying but don't crash
+        if (this._initRetryInterval !== null) {
+          clearInterval(this._initRetryInterval);
+          this._initRetryInterval = null;
+        }
+        log.warn(`⚠️ GameBox connection timeout after ${this._MAX_INIT_RETRIES} attempts. SDK will continue without session.`);
+        return;
+      }
+
+      log.info(`🔄 Retry ${this._initRetryCount}/${this._MAX_INIT_RETRIES} - sending SDK_LOADED beacon...`);
+      this._sendLoadedBeacon();
+    }, this._INIT_RETRY_DELAY_MS);
+  }
+
+  /**
+   * Send SDK_LOADED beacon to parent.
+   */
+  private static _sendLoadedBeacon(): void {
+    try {
+      window.parent.postMessage({
+        controller: '_digitapSecurity',
+        type: 'SDK_LOADED',
+        ts: Date.now()
+      }, '*');
+    } catch (e) {
+      log.error('Failed to send SDK_LOADED beacon', e);
+    }
+  }
+
+  /**
+   * Check if SDK is connected to GameBox.
+   */
+  public static get isConnected(): boolean {
+    return this._isConnected;
+  }
 
   private static _progress: Progress = {
     controller: '_digitapGame',
@@ -231,9 +307,9 @@ class DigitapGamePlayerSDK {
     this._progress.continueScore = scoreAtDeath; // Preserve for potential revive
 
     this._sendData();
-
-    // Force the game to be set to zero when the player fails
-    this.afterStartGameFromZero();
+    // Do NOT auto-reset here - wait for parent to send:
+    // - SDK_START_GAME_FROM_ZERO (restart)
+    // - SDK_CONTINUE_WITH_CURRENT_SCORE (revive)
   }
 
   /**
@@ -321,10 +397,14 @@ class DigitapGamePlayerSDK {
           case 'continueWithCurrentScore':
             log.info(`📢 Continuing with score=${self._progress.continueScore}, level=${self._progress.level}`);
             self._progress.score = self._progress.continueScore;
+            // First restore the score via afterContinueWithCurrentScore
             self.afterContinueWithCurrentScore(
               self._progress.score,
               self._progress.level
             );
+            // Then start/resume the game (game was paused by SDK_PAUSE_GAME)
+            log.info('📢 Calling afterStartGame() to resume');
+            self.afterStartGame();
             break;
         }
       },
@@ -617,18 +697,6 @@ class DigitapGamePlayerSDK {
     });
   });
   
-  // Notify parent immediately that SDK script is loaded
-  // This happens BEFORE the game calls init()
-  try {
-    window.parent.postMessage({
-      controller: '_digitapSecurity',
-      type: 'SDK_LOADED',
-      ts: Date.now()
-    }, '*');
-    log.info('📤 Sent SDK_LOADED beacon to parent');
-  } catch (e) {
-    log.error('Failed to send SDK_LOADED beacon', e);
-  }
 })();
 
 // ============================================================
@@ -636,6 +704,12 @@ class DigitapGamePlayerSDK {
 // ============================================================
 
 securityBridge.init();
+
+// ============================================================
+// Start Connection Handshake with GameBox (with retry logic)
+// ============================================================
+
+DigitapGamePlayerSDK['_startConnectionHandshake']();
 
 // ============================================================
 // BACKWARD COMPATIBILITY: _digitapUser (SDK v1.0.0 API)
@@ -764,7 +838,10 @@ DigitapGamePlayerSDK.afterStartGameFromZero = function () {
 
 DigitapGamePlayerSDK.afterContinueWithCurrentScore = function (score: number, level: number) {
   log.info('🔄 Forwarding afterContinueWithCurrentScore to legacy _digitapUser', { score, level });
-  _digitapUser.progress.score = _digitapUser.progress.continueScore;
+  // Use passed parameters (from modern SDK) - don't rely on _digitapUser.progress which may be stale
+  _digitapUser.progress.score = score;
+  _digitapUser.progress.continueScore = score;
+  _digitapUser.progress.level = level;
   _digitapUser._afterContinueWithCurrentScore();
 };
 

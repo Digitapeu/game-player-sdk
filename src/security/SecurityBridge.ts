@@ -50,10 +50,14 @@ export class SecurityBridge {
   // Rolling hash state for checkpoint integrity
   private _rollingState: RollingHashState | null = null;
 
+  // Connection state callback
+  private _onSessionInitCallback: (() => void) | null = null;
+
   private static readonly _CONTROLLER = '_digitapSecurity';
   private static readonly _ALLOWED_ORIGINS = [
     'https://wam.app',
     'https://app.wam.app',
+    'https://wam.eu',
     'https://win.wam.app',
     'https://play.wam.app'
   ];
@@ -63,6 +67,21 @@ export class SecurityBridge {
     this._canvasHandler = new CanvasHandler();
     this._sketchBuilder = new SketchBuilder();
     this._metadataCollector = new MetadataCollector();
+  }
+
+  /**
+   * Register a callback to be called when session is initialized.
+   * Used by main SDK to track connection state.
+   */
+  onSessionInit(callback: () => void): void {
+    this._onSessionInitCallback = callback;
+  }
+
+  /**
+   * Check if a session has been initialized.
+   */
+  get isSessionActive(): boolean {
+    return this._rollingState !== null;
   }
 
   /**
@@ -279,6 +298,11 @@ export class SecurityBridge {
       initialHash,
       meta
     } as SecurityResponse);
+
+    // Notify main SDK that session is active (for connection tracking)
+    if (this._onSessionInitCallback) {
+      this._onSessionInitCallback();
+    }
   }
 
   /**
@@ -305,8 +329,9 @@ export class SecurityBridge {
     // 2. Get canvas sample
     const { canvasHash, sample } = this._canvasHandler.sample(seed || '0x0');
 
-    // 3. Get behavioral sketch
+    // 3. Get behavioral sketch for this window, then reset for next
     const sketch = this._sketchBuilder.build();
+    this._sketchBuilder.reset();
 
     // 4. Compute rolling hash (if session is initialized)
     let rollingHash = '0x';

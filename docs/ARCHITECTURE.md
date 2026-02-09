@@ -90,23 +90,51 @@ The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5
                     │
 2. SDK script executes immediately
    ├── Attach global message listener
-   ├── Send SDK_LOADED beacon to parent
-   └── Initialize SecurityBridge
-       ├── Start InputCapture (event listeners)
-       ├── Start CanvasHandler (canvas polling)
-       └── Send SDK_SECURITY_READY beacon
+   ├── Initialize SecurityBridge
+   │   ├── Start InputCapture (event listeners)
+   │   ├── Start CanvasHandler (canvas polling)
+   │   └── Send SDK_SECURITY_READY beacon
+   │
+   └── Start Connection Handshake (with retry)
+       ├── Send SDK_LOADED beacon to parent
+       └── Retry every 500ms (max 10 attempts)
                     │
-3. GameBox receives SDK_SECURITY_READY
+3. GameBox receives SDK_LOADED / SDK_SECURITY_READY
    └── Send SDK_SESSION_INIT with sessionId
                     │
-4. SDK computes initialHash
-   ├── H₀ = keccak256(sessionId || screenW || screenH || ts)
-   └── Send SDK_SESSION_INIT_ACK with initialHash, meta
+4. SDK receives SDK_SESSION_INIT
+   ├── Compute H₀ = keccak256(sessionId || screenW || screenH || ts)
+   ├── Send SDK_SESSION_INIT_ACK with initialHash, meta
+   ├── Set _isConnected = true
+   └── Clear retry interval
                     │
 5. Game code calls digitapSDK('init', ...)
    ├── Send SDK_SETTINGS to parent
    └── GameBox ready to request checkpoints
 ```
+
+### Connection Retry Mechanism
+
+The SDK implements a retry mechanism to handle race conditions where the SDK loads before GameBox is ready:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `_MAX_INIT_RETRIES` | 10 | Maximum connection attempts |
+| `_INIT_RETRY_DELAY_MS` | 500ms | Delay between retries |
+| **Total timeout** | 5 seconds | After which SDK continues without session |
+
+```
+SDK_LOADED beacon sent
+        │
+        ├─► GameBox responds with SDK_SESSION_INIT
+        │       └─► _isConnected = true, stop retrying
+        │
+        └─► No response after 500ms
+                └─► Retry (up to 10 times)
+                        └─► After 10 fails: warn & continue
+```
+
+The SDK remains functional even if GameBox doesn't respond - score reporting and callbacks still work, but security checkpoints won't be available until a session is established.
 
 ---
 
@@ -862,6 +890,7 @@ These require server-side validation and are handled by the GameBox/backend.
 
 | Version | Changes |
 |---------|---------|
+| 3.2.0 | Added connection retry mechanism (10 retries, 500ms interval, 5s timeout) |
 | 3.1.0 | Added backward compatibility layer for `_digitapUser` (v1.0.0 API), dual protocol support |
 | 3.0.0 | Added keccak256, rolling hash chain, checkpoint protocol |
 | 2.0.0 | Added SecurityBridge module, behavioral fingerprinting, canvas verification |
