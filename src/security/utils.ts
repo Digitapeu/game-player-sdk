@@ -134,9 +134,20 @@ export function deterministicRandom(seed: string, index: number): number {
 /**
  * Encode an object to canonical JSON (deterministic field ordering).
  * Critical for hash consistency across platforms.
+ * Recursively sorts keys at all nesting levels.
  */
 export function canonicalJSON(obj: unknown): string {
-  return JSON.stringify(obj, Object.keys(obj as object).sort());
+  return JSON.stringify(obj, (_, value) => {
+    // Only sort object keys, not arrays
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(value).sort()) {
+        sorted[key] = value[key];
+      }
+      return sorted;
+    }
+    return value;
+  });
 }
 
 /**

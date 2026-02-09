@@ -97,7 +97,7 @@ export class SecurityBridge {
 
     log.info('🚀 Initializing SecurityBridge...');
     log.info('✓ Using keccak256 (Ethereum-compatible) for all hashes');
-
+    
     // Start capturing input events
     this._inputCapture.start();
     log.info('✓ InputCapture started');

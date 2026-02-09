@@ -46,6 +46,11 @@ class DigitapGamePlayerSDK {
 
   private static _allowedOrigins: string[] = ALLOWED_ORIGINS;
 
+  // Throttle stateHash computation to avoid lag on frequent setProgress calls
+  private static _lastStateHashTime: number = 0;
+  private static _lastStateHash: string = '0x';
+  private static readonly _STATE_HASH_THROTTLE_MS = 500;
+
   /**
    * Start the connection handshake with GameBox.
    * Sends SDK_LOADED beacon and retries until GameBox responds with SDK_SESSION_INIT.
@@ -247,13 +252,21 @@ class DigitapGamePlayerSDK {
   /**
    * Set progress of a game.
    * Computes stateHash from input events and canvas state for integrity verification.
+   * StateHash computation is throttled to avoid lag on frequent calls.
    */
   public static setProgress(state: string, score: number, level: number): void {
     log.info(`setProgress: state=${state}, score=${score}, level=${level}`);
     
-    // Compute stateHash for cryptographic evidence
-    // This ties the score to input events and game visual state
-    const stateHash = securityBridge.computeStateHash(score);
+    // Throttle stateHash computation to avoid lag
+    // Only recompute if enough time has passed since last computation
+    const now = Date.now();
+    let stateHash = this._lastStateHash;
+    
+    if (now - this._lastStateHashTime >= this._STATE_HASH_THROTTLE_MS) {
+      stateHash = securityBridge.computeStateHash(score);
+      this._lastStateHash = stateHash;
+      this._lastStateHashTime = now;
+    }
     
     // Set the current progress with stateHash
     this._progress = {
@@ -263,7 +276,7 @@ class DigitapGamePlayerSDK {
       level,
       continueScore: score,
       controller: '_digitapGame',
-      stateHash,  // ✅ Now included!
+      stateHash,
     };
 
     this._sendData();
@@ -838,10 +851,12 @@ DigitapGamePlayerSDK.afterStartGameFromZero = function () {
 
 DigitapGamePlayerSDK.afterContinueWithCurrentScore = function (score: number, level: number) {
   log.info('🔄 Forwarding afterContinueWithCurrentScore to legacy _digitapUser', { score, level });
-  // Use passed parameters (from modern SDK) - don't rely on _digitapUser.progress which may be stale
-  _digitapUser.progress.score = score;
-  _digitapUser.progress.continueScore = score;
-  _digitapUser.progress.level = level;
+  // Legacy games: _digitapUser.progress values are set via sendData()
+  // Modern games: _digitapUser.progress may be stale, use passed parameters as fallback
+  const finalScore = _digitapUser.progress.continueScore || score;
+  const finalLevel = _digitapUser.progress.level ?? level;
+  _digitapUser.progress.score = finalScore;
+  _digitapUser.progress.level = finalLevel;
   _digitapUser._afterContinueWithCurrentScore();
 };
 

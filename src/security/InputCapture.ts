@@ -17,8 +17,15 @@ export class InputCapture {
   private _activePointers = new Map<number, { startTime: number; x: number; y: number }>();
   private _holdCheckInterval: number | null = null;
   private _isStarted = false;
+  private _boundCapture: (e: Event) => void;
 
   private static readonly _HOLD_THRESHOLD_MS = 300;
+  private static readonly _MAX_BUFFER_SIZE = 10000; // Prevent unbounded growth
+
+  constructor() {
+    // Bind once so we can remove later
+    this._boundCapture = (e: Event) => this._capture(e);
+  }
 
   /**
    * Start capturing input events.
@@ -32,7 +39,7 @@ export class InputCapture {
 
     const events = ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mousemove', 'mouseup'];
     events.forEach(type => {
-      window.addEventListener(type, (e) => this._capture(e), { passive: true });
+      window.addEventListener(type, this._boundCapture, { passive: true });
     });
     log.info(`InputCapture listening for: ${events.join(', ')}`);
 
@@ -47,6 +54,12 @@ export class InputCapture {
   stop(): void {
     if (!this._isStarted) return;
     this._isStarted = false;
+
+    // Remove event listeners
+    const events = ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mousemove', 'mouseup'];
+    events.forEach(type => {
+      window.removeEventListener(type, this._boundCapture);
+    });
 
     if (this._holdCheckInterval !== null) {
       clearInterval(this._holdCheckInterval);
@@ -107,7 +120,10 @@ export class InputCapture {
       log.event(`RELEASE at (${raw.x?.toFixed(0)}, ${raw.y?.toFixed(0)}) - buffer: ${this._buffer.length + 1}`);
     }
 
-    this._buffer.push(raw);
+    // Prevent unbounded buffer growth
+    if (this._buffer.length < InputCapture._MAX_BUFFER_SIZE) {
+      this._buffer.push(raw);
+    }
   }
 
   /**

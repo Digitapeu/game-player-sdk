@@ -55,9 +55,13 @@ export class SketchBuilder {
         const dy = e.y - this._lastPosition.y;
         const dt = now - this._lastPosition.ts;
         
-        if (dt > 0) {
+        // Only record if dt is reasonable (>1ms) to avoid Infinity/NaN
+        if (dt > 1) {
           const velocity = Math.sqrt(dx * dx + dy * dy) / dt;
-          this._velocities.push(velocity);
+          // Sanity check: cap velocity at reasonable max (10000 px/ms is absurd)
+          if (isFinite(velocity) && velocity < 10000) {
+            this._velocities.push(velocity);
+          }
         }
       }
       

@@ -13,8 +13,12 @@ import { log } from './logger';
 export class CanvasHandler {
   private _canvas: HTMLCanvasElement | null = null;
   private _ctx: CanvasRenderingContext2D | null = null;
+  private _glCtx: WebGLRenderingContext | WebGL2RenderingContext | null = null;
+  private _samplerCanvas: HTMLCanvasElement | null = null;
+  private _samplerCtx: CanvasRenderingContext2D | null = null;
   private _findInterval: number | null = null;
   private _isStarted = false;
+  private _isWebGL = false;
 
   private static readonly _SAMPLE_POINTS = 8;
   private static readonly _WATERMARK_REGION = { x: 0, y: 0, w: 64, h: 8 };
@@ -52,6 +56,7 @@ export class CanvasHandler {
 
   /**
    * Find the canvas element in the document.
+   * Handles both 2D and WebGL canvases (e.g., Construct 3).
    */
   private _findCanvas(): void {
     if (this._canvas) return;
@@ -60,17 +65,35 @@ export class CanvasHandler {
     if (this._canvas) {
       log.info(`✓ Canvas found! Size: ${this._canvas.width}x${this._canvas.height}`);
       
+      // Try to determine context type by checking existing context
+      // Note: calling getContext() with a different type than existing returns null
       try {
+        // First try 2D (most common for simple games)
         this._ctx = this._canvas.getContext('2d', { willReadFrequently: true });
         if (this._ctx) {
           log.info('✓ Got 2D context with willReadFrequently=true');
+          this._isWebGL = false;
         } else {
-          log.warn('Could not get 2D context (might be WebGL canvas)');
+          // Canvas is likely WebGL - try to get its GL context
+          this._glCtx = this._canvas.getContext('webgl2') as WebGL2RenderingContext
+                     || this._canvas.getContext('webgl') as WebGLRenderingContext
+                     || this._canvas.getContext('experimental-webgl') as WebGLRenderingContext;
+          
+          if (this._glCtx) {
+            log.info('✓ Detected WebGL canvas - using snapshot method for sampling');
+            this._isWebGL = true;
+            
+            // Create offscreen canvas for sampling WebGL content
+            this._samplerCanvas = document.createElement('canvas');
+            this._samplerCanvas.width = this._canvas.width;
+            this._samplerCanvas.height = this._canvas.height;
+            this._samplerCtx = this._samplerCanvas.getContext('2d', { willReadFrequently: true });
+          } else {
+            log.warn('Could not get any canvas context');
+          }
         }
-      } catch {
-        // Some games use WebGL context
-        this._ctx = null;
-        log.warn('Failed to get 2D context - canvas may be WebGL');
+      } catch (err) {
+        log.warn('Failed to get canvas context', err);
       }
       
       // Stop looking once found
@@ -85,13 +108,21 @@ export class CanvasHandler {
   /**
    * Sample canvas at deterministic points based on seed.
    * Uses keccak256 for hash (Ethereum-compatible).
+   * Handles both 2D and WebGL canvases.
    */
   sample(seed: string): CanvasSampleResult {
     // Ensure we have a canvas
     this._findCanvas();
 
-    if (!this._ctx || !this._canvas) {
-      log.warn('Canvas sample failed - no canvas or context available');
+    if (!this._canvas) {
+      log.warn('Canvas sample failed - no canvas found');
+      return { canvasHash: '0x', sample: '' };
+    }
+
+    // Get appropriate 2D context (either native or via snapshot for WebGL)
+    const ctx = this._getReadableContext();
+    if (!ctx) {
+      log.warn('Canvas sample failed - no readable context available');
       return { canvasHash: '0x', sample: '' };
     }
 
@@ -113,7 +144,7 @@ export class CanvasHandler {
         const y = Math.floor(pointSeed / w) % h;
 
         // Sample a 2x2 block and average
-        const block = this._ctx.getImageData(x, y, 2, 2).data;
+        const block = ctx.getImageData(x, y, 2, 2).data;
         const avg = this._averageBlock(block);
 
         // Store 4-bit quantized values
@@ -128,7 +159,7 @@ export class CanvasHandler {
       const canvasHash = keccak256Bytes(samples);
       const sample = bytesToHex(samples);
 
-      log.info(`Sampled ${CanvasHandler._SAMPLE_POINTS} points: ${samplePoints.join(', ')}`);
+      log.info(`Sampled ${CanvasHandler._SAMPLE_POINTS} points${this._isWebGL ? ' (WebGL)' : ''}: ${samplePoints.join(', ')}`);
       return { canvasHash, sample };
     } catch (err) {
       // Canvas might be tainted or have other issues
@@ -138,13 +169,50 @@ export class CanvasHandler {
   }
 
   /**
+   * Get a 2D context that can read pixels.
+   * For WebGL canvases, creates a snapshot into 2D canvas first.
+   */
+  private _getReadableContext(): CanvasRenderingContext2D | null {
+    if (!this._canvas) return null;
+
+    // 2D canvas - use directly
+    if (this._ctx) {
+      return this._ctx;
+    }
+
+    // WebGL canvas - snapshot to 2D canvas
+    if (this._isWebGL && this._samplerCanvas && this._samplerCtx) {
+      try {
+        // Resize sampler canvas if game canvas changed
+        if (this._samplerCanvas.width !== this._canvas.width ||
+            this._samplerCanvas.height !== this._canvas.height) {
+          this._samplerCanvas.width = this._canvas.width;
+          this._samplerCanvas.height = this._canvas.height;
+        }
+
+        // Draw WebGL canvas content to 2D canvas
+        this._samplerCtx.drawImage(this._canvas, 0, 0);
+        return this._samplerCtx;
+      } catch (err) {
+        log.warn('Failed to snapshot WebGL canvas', err);
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Embed watermark data in canvas using LSB steganography.
+   * Note: Only works on 2D canvases. WebGL canvases don't support embedding.
    */
   embed(data: string): CanvasEmbedResult {
     // Ensure we have a canvas
     this._findCanvas();
 
+    // Embedding only works on 2D canvas (not WebGL)
     if (!this._ctx || !this._canvas) {
+      log.warn('Canvas embed failed - no 2D context (WebGL canvases not supported for embedding)');
       return { success: false };
     }
 

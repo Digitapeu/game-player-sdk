@@ -202,9 +202,37 @@ GameBox                                        SDK
 | `SDK_START_GAME` | `startGame` | Start game | - |
 | `SDK_PAUSE_GAME` | - | Pause game | - |
 | `SDK_START_GAME_FROM_ZERO` | `startGameFromZero` | Restart from zero | - |
-| `SDK_CONTINUE_WITH_CURRENT_SCORE` | `continueWithCurrentScore` | Continue after death | - |
+| `SDK_CONTINUE_WITH_CURRENT_SCORE` | `continueWithCurrentScore` | Continue after death (revive) | - |
 
 > **Backward Compatibility:** The SDK accepts both NEW (`SDK_*`) and OLD (camelCase) message types for compatibility with older GameBox versions.
+
+### Player Death & Revive Flow
+
+When a player dies, the SDK does **NOT** auto-reset. It waits for GameBox to decide:
+
+```
+Game calls: setPlayerFailed('FAIL')
+        │
+        ├── SDK captures score before setting to 0
+        ├── Computes stateHash at death moment
+        ├── Sets: continueScore = scoreAtDeath, score = 0
+        ├── Sends SDK_PLAYER_FAILED to GameBox
+        │
+        └── Game remains PAUSED - SDK waits for parent decision
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+SDK_START_GAME_FROM_ZERO    SDK_CONTINUE_WITH_CURRENT_SCORE
+        │                       │
+        ├── score = 0           ├── score = continueScore (restore)
+        ├── level = 0           ├── level preserved
+        └── afterStartGame      ├── afterContinueWithCurrentScore()
+            FromZero()          └── afterStartGame() (resume)
+```
+
+**Critical:** The revive flow calls BOTH `afterContinueWithCurrentScore()` AND `afterStartGame()` to:
+1. Restore the score/level state
+2. Resume/unpause the game
 
 ### Security Protocol Messages
 
@@ -323,6 +351,23 @@ Every score update includes a `stateHash` that cryptographically ties the score 
 stateHash = keccak256(inputDigest | canvasHash | metaFingerprint | score | timestamp)
 ```
 
+#### StateHash Throttling
+
+To prevent performance issues (lag) on games that call `setProgress()` frequently, stateHash computation is **throttled to 500ms**:
+
+```typescript
+private static readonly _STATE_HASH_THROTTLE_MS = 500;
+
+// In setProgress():
+if (now - this._lastStateHashTime >= this._STATE_HASH_THROTTLE_MS) {
+  stateHash = securityBridge.computeStateHash(score);
+  this._lastStateHash = stateHash;
+  this._lastStateHashTime = now;
+}
+```
+
+> **Note:** `setLevelUp()` and `setPlayerFailed()` bypass the throttle as they are critical events that occur less frequently.
+
 #### What StateHash Proves
 
 | Component | Source | Evidence |
@@ -372,6 +417,14 @@ metaFingerprint = keccak256(screenW | screenH | dpr | platform | touchCapable)
 
 Passively captures all user input events (touch, mouse) without interfering with game functionality.
 
+#### Features
+
+| Feature | Value | Purpose |
+|---------|-------|---------|
+| `_MAX_BUFFER_SIZE` | 10,000 events | Prevent unbounded memory growth |
+| `_HOLD_THRESHOLD_MS` | 300ms | Detect long-press gestures |
+| Event cleanup | `removeEventListener` on `stop()` | Prevent memory leaks |
+
 #### Digest Generation
 
 Events are serialized to canonical JSON and hashed with **keccak256** for integrity verification:
@@ -388,6 +441,26 @@ const digest = keccak256(canonicalJSON(events));
 
 Handles canvas operations for game state verification and watermarking.
 
+#### 2D vs WebGL Canvas Support
+
+The SDK automatically detects canvas type and uses the appropriate sampling method:
+
+| Canvas Type | Detection | Sampling Method |
+|-------------|-----------|-----------------|
+| 2D Canvas | `getContext('2d')` returns context | Direct `getImageData()` |
+| WebGL Canvas | `getContext('webgl'/'webgl2')` | Snapshot to offscreen 2D canvas |
+
+```typescript
+// For WebGL canvases (e.g., Construct 3, Phaser with WebGL):
+if (this._isWebGL && this._samplerCanvas && this._samplerCtx) {
+  // Draw WebGL canvas to 2D canvas, then sample
+  this._samplerCtx.drawImage(this._canvas, 0, 0);
+  return this._samplerCtx;
+}
+```
+
+> **Note:** Canvas watermarking (embed/extract) only works on 2D canvases. WebGL canvases don't support embedding.
+
 #### Canvas Sampling
 
 Uses **keccak256** for deterministic point selection and hash generation:
@@ -396,6 +469,52 @@ Uses **keccak256** for deterministic point selection and hash generation:
 sample(seed: string): CanvasSampleResult {
   const canvasHash = keccak256Bytes(samples);
   // ...
+}
+```
+
+---
+
+### SketchBuilder
+
+**Location:** `src/security/SketchBuilder.ts`
+
+Builds a 64-byte behavioral fingerprint for bot detection from user input patterns.
+
+#### Sketch Layout (64 bytes)
+
+| Bytes | Content | Purpose |
+|-------|---------|---------|
+| 0-7 | Tap interval histogram | Detect robotic timing |
+| 8-15 | Touch zone distribution | Detect unrealistic patterns |
+| 16-23 | Velocity histogram | Detect inhuman movement |
+| 24-47 | Reserved | Future use |
+| 48-55 | Entropy measures | Statistical randomness |
+| 56-63 | Metadata (event counts) | Volume metrics |
+
+#### Per-Checkpoint Reset
+
+**Critical:** The SketchBuilder is **reset after each checkpoint** to ensure each window's sketch represents only that window's behavior:
+
+```typescript
+// In _handleCheckpointRequest():
+const sketch = this._sketchBuilder.build();
+this._sketchBuilder.reset(); // Reset for next window
+```
+
+Without this reset, sketches would accumulate events from all previous windows, making them useless for detecting anomalies in specific time periods.
+
+#### Velocity Sanity Checks
+
+Velocity calculations include sanity checks to prevent Infinity/NaN:
+
+```typescript
+// Only record if dt > 1ms (avoid division by near-zero)
+if (dt > 1) {
+  const velocity = Math.sqrt(dx * dx + dy * dy) / dt;
+  // Cap at reasonable max (10000 px/ms is absurd)
+  if (isFinite(velocity) && velocity < 10000) {
+    this._velocities.push(velocity);
+  }
 }
 ```
 
@@ -596,6 +715,28 @@ function deterministicRandom(seed: string, index: number): number {
 }
 ```
 
+### Canonical JSON
+
+For hash consistency across platforms, objects are serialized with **recursively sorted keys**:
+
+```typescript
+function canonicalJSON(obj: unknown): string {
+  return JSON.stringify(obj, (_, value) => {
+    // Only sort object keys, not arrays
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(value).sort()) {
+        sorted[key] = value[key];
+      }
+      return sorted;
+    }
+    return value;
+  });
+}
+```
+
+> **Critical:** This handles nested objects. A naive `Object.keys().sort()` only sorts top-level keys.
+
 ---
 
 ## Checkpoint Protocol
@@ -668,7 +809,7 @@ Where:
 │ 5. SDK collects:                                                        │
 │    • Flush input events → inputDigest                                   │
 │    • Sample canvas at seed points → canvasHash                          │
-│    • Build behavioral sketch → sketch                                   │
+│    • Build behavioral sketch → sketch, then RESET for next window       │
 │    • Compute: H[w] = keccak256(H[w-1] || nonceW || ... )                │
 │                                                                         │
 │ 6. SDK → GameBox: SDK_CHECKPOINT_RESPONSE {                             │
@@ -890,6 +1031,7 @@ These require server-side validation and are handled by the GameBox/backend.
 
 | Version | Changes |
 |---------|---------|
+| 3.3.0 | WebGL canvas support (Construct 3), StateHash throttling (500ms), player death flow fix (no auto-reset), revive fix (afterStartGame called), SketchBuilder per-checkpoint reset, InputCapture memory leak fix, canonicalJSON recursive sort |
 | 3.2.0 | Added connection retry mechanism (10 retries, 500ms interval, 5s timeout) |
 | 3.1.0 | Added backward compatibility layer for `_digitapUser` (v1.0.0 API), dual protocol support |
 | 3.0.0 | Added keccak256, rolling hash chain, checkpoint protocol |
@@ -904,7 +1046,8 @@ These require server-side validation and are handled by the GameBox/backend.
 | 2.0.0 | ❌ | ✅ Native | Input + Canvas |
 | 3.0.0 | ❌ | ✅ Native | Full (keccak256, rolling hash) |
 | 3.1.0+ | ✅ Shim | ✅ Native | Full (all features) |
+| 3.3.0+ | ✅ Shim | ✅ Native | Full + WebGL + Throttling |
 
 ---
 
-*Last updated: January 2026*
+*Last updated: February 2026*
