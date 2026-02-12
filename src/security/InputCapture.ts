@@ -3,24 +3,20 @@
  * 
  * Captures all user input events passively and provides:
  * - Raw events array with normalized coordinates (0-1)
- * - keccak256 digest of events for integrity verification (Ethereum-compatible)
- * - Hold detection (>300ms threshold)
+ * - Backend can compute digest if needed for verification
  */
 
 import type { InputEvent, RawInputEvent } from '../types';
-import { keccak256, canonicalJSON } from './utils';
 import { log } from './logger';
 
 export class InputCapture {
   private _buffer: RawInputEvent[] = [];
   private _lastEventTime = 0;
   private _activePointers = new Map<number, { startTime: number; x: number; y: number }>();
-  private _holdCheckInterval: number | null = null;
   private _isStarted = false;
   private _boundCapture: (e: Event) => void;
 
-  private static readonly _HOLD_THRESHOLD_MS = 300;
-  private static readonly _MAX_BUFFER_SIZE = 10000; // Prevent unbounded growth
+  private static readonly _MAX_BUFFER_SIZE = 5000; // Prevent unbounded growth
 
   constructor() {
     // Bind once so we can remove later
@@ -29,23 +25,23 @@ export class InputCapture {
 
   /**
    * Start capturing input events.
+   * NOTE: We only capture start/end events, NOT move events (too frequent on mobile).
    */
   start(): void {
     if (this._isStarted) {
-      log.warn('InputCapture already started');
       return;
     }
     this._isStarted = true;
 
-    const events = ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mousemove', 'mouseup'];
+    // Only capture tap/release - NOT move events (they fire 60+ fps and kill mobile)
+    const events = ['touchstart', 'touchend', 'mousedown', 'mouseup'];
     events.forEach(type => {
       window.addEventListener(type, this._boundCapture, { passive: true });
     });
     log.info(`InputCapture listening for: ${events.join(', ')}`);
 
-    // Periodic hold detection
-    this._holdCheckInterval = window.setInterval(() => this._checkHolds(), 100);
-    log.info('Hold detection interval started (100ms)');
+    // Hold detection only runs when there are active pointers (lazy)
+    // No interval needed - we detect holds on flush
   }
 
   /**
@@ -56,15 +52,15 @@ export class InputCapture {
     this._isStarted = false;
 
     // Remove event listeners
-    const events = ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mousemove', 'mouseup'];
+    const events = ['touchstart', 'touchend', 'mousedown', 'mouseup'];
     events.forEach(type => {
       window.removeEventListener(type, this._boundCapture);
     });
 
-    if (this._holdCheckInterval !== null) {
-      clearInterval(this._holdCheckInterval);
-      this._holdCheckInterval = null;
-    }
+    // Clear state
+    this._activePointers.clear();
+    this._buffer = [];
+    this._lastEventTime = 0;
   }
 
   /**
@@ -114,10 +110,8 @@ export class InputCapture {
       if (raw.x !== undefined && raw.y !== undefined) {
         this._activePointers.set(raw.pointerId, { startTime: now, x: raw.x, y: raw.y });
       }
-      log.event(`TAP at (${raw.x?.toFixed(0)}, ${raw.y?.toFixed(0)}) - buffer: ${this._buffer.length + 1}`);
     } else if (e.type === 'touchend' || e.type === 'mouseup') {
       this._activePointers.delete(raw.pointerId);
-      log.event(`RELEASE at (${raw.x?.toFixed(0)}, ${raw.y?.toFixed(0)}) - buffer: ${this._buffer.length + 1}`);
     }
 
     // Prevent unbounded buffer growth
@@ -127,36 +121,13 @@ export class InputCapture {
   }
 
   /**
-   * Check for hold gestures (pointer held > threshold).
-   */
-  private _checkHolds(): void {
-    const now = performance.now();
-    for (const [pointerId, pointer] of this._activePointers) {
-      if (now - pointer.startTime > InputCapture._HOLD_THRESHOLD_MS) {
-        this._buffer.push({
-          type: 'hold',
-          ts: now,
-          dt: now - this._lastEventTime,
-          x: pointer.x,
-          y: pointer.y,
-          pointerId
-        });
-        // Reset start time to prevent duplicate holds
-        pointer.startTime = now;
-      }
-    }
-  }
-
-  /**
-   * Flush the event buffer and return normalized events with digest.
-   * Digest is keccak256 hash for backend verification.
+   * Flush the event buffer and return normalized events.
+   * Note: Hash computation skipped for performance - backend can hash if needed.
    */
   flush(): { events: InputEvent[]; digest: string } {
     const events = this._normalize(this._buffer);
-    const digest = keccak256(canonicalJSON(events));
     this._buffer = [];
-    log.info(`Flushed ${events.length} events, digest: ${digest.slice(0, 18)}...`);
-    return { events, digest };
+    return { events, digest: '0x0' }; // Backend computes hash if needed
   }
 
   /**
@@ -184,20 +155,16 @@ export class InputCapture {
 
   /**
    * Map DOM event type to backend event type.
+   * Note: Only tap/release captured now (move events removed for performance).
    */
-  private _mapType(domType: string): 'tap' | 'swipe' | 'hold' | 'release' {
+  private _mapType(domType: string): 'tap' | 'release' {
     switch (domType) {
       case 'touchstart':
       case 'mousedown':
         return 'tap';
-      case 'touchmove':
-      case 'mousemove':
-        return 'swipe';
       case 'touchend':
       case 'mouseup':
         return 'release';
-      case 'hold':
-        return 'hold';
       default:
         return 'tap';
     }

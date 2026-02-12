@@ -135,7 +135,6 @@ export class CanvasHandler {
     }
 
     const samples = new Uint8Array(CanvasHandler._SAMPLE_POINTS * 4);
-    const samplePoints: string[] = [];
 
     try {
       for (let i = 0; i < CanvasHandler._SAMPLE_POINTS; i++) {
@@ -152,14 +151,11 @@ export class CanvasHandler {
         samples[i * 4 + 1] = avg.g >> 4;
         samples[i * 4 + 2] = avg.b >> 4;
         samples[i * 4 + 3] = avg.a >> 4;
-        
-        samplePoints.push(`(${x},${y})`);
       }
 
       const canvasHash = keccak256Bytes(samples);
       const sample = bytesToHex(samples);
 
-      log.info(`Sampled ${CanvasHandler._SAMPLE_POINTS} points${this._isWebGL ? ' (WebGL)' : ''}: ${samplePoints.join(', ')}`);
       return { canvasHash, sample };
     } catch (err) {
       // Canvas might be tainted or have other issues

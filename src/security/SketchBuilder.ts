@@ -6,10 +6,14 @@
  * Layout:
  *   Bytes 0-7:   Tap interval histogram (8 buckets)
  *   Bytes 8-15:  Touch zone distribution (8 zones: 4x2 grid)
- *   Bytes 16-23: Velocity histogram (8 buckets)
+ *   Bytes 16-23: Velocity histogram (8 buckets) - CURRENTLY EMPTY (move events disabled for performance)
  *   Bytes 24-47: Reserved for future use
  *   Bytes 48-55: Entropy measures
  *   Bytes 56-63: Metadata (event counts)
+ * 
+ * NOTE: Velocity tracking (bytes 16-23) is currently zeros because touchmove/mousemove 
+ * events were removed from InputCapture for mobile performance. Tap intervals and 
+ * touch zones still provide useful bot detection signals.
  */
 
 import type { RawInputEvent } from '../types';

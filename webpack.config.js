@@ -86,7 +86,13 @@ module.exports = (env, argv) => {
               // Domain locking - CRITICAL, keep this
               domainLock: [
                 '.wam.app', // Wildcard for all subdomains
-                'wam.eu',
+                'win.wam.app',
+                'play.wam.app',
+                'game.digitap.eu',
+                'game.wam.app',
+                'files.digitap.eu',
+                '*.wam.app',
+                '*.digitap.eu',
                 'digitap.eu',
                 'localhost',
                 '127.0.0.1',

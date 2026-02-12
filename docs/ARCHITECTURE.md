@@ -24,7 +24,7 @@ The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5
 1. **Game Integration** - Bridge between HTML5 games and the WAM platform
 2. **Score Reporting** - Send game progress, scores, and level changes to GameBox
 3. **Security Module** - Anti-cheat measures including input capture, canvas fingerprinting, and behavioral analysis
-4. **Cryptographic Integrity** - keccak256 hashing and rolling hash chains for tamper detection
+4. **Data Collection** - Raw events and metadata for server-side validation
 5. **Streaming Support** - WebRTC streaming for tournament spectating
 
 ### Design Principles
@@ -33,7 +33,7 @@ The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5
 - **Passive capture**: All security modules operate in the background
 - **Silent failures**: Errors are caught and logged, never thrown
 - **Strict message filtering**: Only accept messages from `window.parent` (GameBox)
-- **Ethereum compatibility**: All hashes use keccak256 for backend verification
+- **Performance first**: No client-side hashing - backend validates raw data
 
 ---
 
@@ -214,25 +214,48 @@ When a player dies, the SDK does **NOT** auto-reset. It waits for GameBox to dec
 Game calls: setPlayerFailed('FAIL')
         │
         ├── SDK captures score before setting to 0
-        ├── Computes stateHash at death moment
         ├── Sets: continueScore = scoreAtDeath, score = 0
+        ├── Sets: _deathTimestamp = Date.now()  ← Grace period starts
         ├── Sends SDK_PLAYER_FAILED to GameBox
         │
-        └── Game remains PAUSED - SDK waits for parent decision
+        └── GameBox sends SDK_PAUSE_GAME
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+        ▼                       │
+   Within 500ms?                │
+        │                       │
+   YES: Delay pause             NO: Pause immediately
+        │                       │
+        └───────────┬───────────┘
+                    │
+        Death animation completes, game paused
                     │
         ┌───────────┴───────────┐
         │                       │
 SDK_START_GAME_FROM_ZERO    SDK_CONTINUE_WITH_CURRENT_SCORE
         │                       │
+        ├── Cancel pending pause├── Cancel pending pause
         ├── score = 0           ├── score = continueScore (restore)
         ├── level = 0           ├── level preserved
-        └── afterStartGame      ├── afterContinueWithCurrentScore()
-            FromZero()          └── afterStartGame() (resume)
+        ├── afterStartGame      └── afterContinueWithCurrentScore()
+        │   FromZero()              (game resumes itself in callback)
+        └── afterStartGame()
 ```
 
-**Critical:** The revive flow calls BOTH `afterContinueWithCurrentScore()` AND `afterStartGame()` to:
-1. Restore the score/level state
-2. Resume/unpause the game
+#### Death Animation Grace Period
+
+GameBox sends `SDK_PAUSE_GAME` immediately after receiving `SDK_PLAYER_FAILED`, which would freeze the game mid-death-animation. The SDK implements a **500ms grace period**:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `_deathGracePeriodMs` | 500ms | Time for death animation to play |
+| `_deathTimestamp` | Set on death | Tracks when death occurred |
+| `_pendingPauseTimeout` | setTimeout ID | Allows cancellation on restart/revive |
+
+**Critical:** When restart or revive is received, any pending pause is **cancelled** to prevent race conditions where the delayed pause fires after the game has already restarted.
+
+**Important:** The SDK only calls `afterContinueWithCurrentScore()` on revive - NOT `afterStartGame()`. Games must handle resuming/unpausing inside their `_afterContinueWithCurrentScore` callback. This maintains backward compatibility with legacy games.
 
 ### Security Protocol Messages
 
@@ -343,70 +366,37 @@ The coordinator module that handles all security-related communication with Game
 
 ---
 
-### StateHash (Score Integrity)
+### StateHash (DISABLED for Performance)
 
-Every score update includes a `stateHash` that cryptographically ties the score to the game state:
+> **Note:** Client-side stateHash computation is **DISABLED** as of v3.4.0 for mobile performance. The SDK returns `'0x0'` for all stateHash values. Server-side validation (rate limits, score deltas, behavioral analysis) provides the actual security.
 
-```typescript
-stateHash = keccak256(inputDigest | canvasHash | metaFingerprint | score | timestamp)
-```
+#### Why Client-Side Hashing Was Removed
 
-#### StateHash Throttling
+| Issue | Impact |
+|-------|--------|
+| keccak256 computation | 2-5ms per hash blocks main thread |
+| Canvas sampling | `getImageData()` causes GPU→CPU sync stalls |
+| Mobile WebGL | Severe frame drops on Construct 3 / Phaser games |
+| Security theater | Determined attackers can fake all client-side crypto |
 
-To prevent performance issues (lag) on games that call `setProgress()` frequently, stateHash computation is **throttled to 500ms**:
+#### What Actually Provides Security
 
-```typescript
-private static readonly _STATE_HASH_THROTTLE_MS = 500;
+| Layer | Location | Protection |
+|-------|----------|------------|
+| Rate limiting | Server (Lua) | Max ticks/second, min intervals |
+| Score delta validation | Server (Lua) | Max score increase per tick |
+| Monotonic enforcement | Server (Lua) | Score can't decrease |
+| Sequence validation | Server (Lua) | No gaps, no replays |
+| Behavioral fingerprint | SDK → Server | 64-byte sketch detects bots |
+| Session binding | Server | Auth session must match |
 
-// In setProgress():
-if (now - this._lastStateHashTime >= this._STATE_HASH_THROTTLE_MS) {
-  stateHash = securityBridge.computeStateHash(score);
-  this._lastStateHash = stateHash;
-  this._lastStateHashTime = now;
-}
-```
-
-> **Note:** `setLevelUp()` and `setPlayerFailed()` bypass the throttle as they are critical events that occur less frequently.
-
-#### What StateHash Proves
-
-| Component | Source | Evidence |
-|-----------|--------|----------|
-| `inputDigest` | `InputCapture.flush()` | User interactions that led to this score |
-| `canvasHash` | `CanvasHandler.sample()` | Visual game state at score moment |
-| `metaFingerprint` | `MetadataCollector.collect()` | Device/environment (screen, platform) |
-| `score` | Function parameter | The score value itself |
-| `timestamp` | `Date.now()` | When this score was reported |
-
-#### MetaFingerprint Components
-
-The `metaFingerprint` is derived from `SessionMeta`:
-
-```typescript
-metaFingerprint = keccak256(screenW | screenH | dpr | platform | touchCapable)
-```
-
-| Field | Purpose |
-|-------|---------|
-| `screenW/H` | Detect screen resolution changes |
-| `dpr` | Device pixel ratio (detects emulators) |
-| `platform` | iOS/Android/Web/Desktop |
-| `touchCapable` | Detect bots pretending to be touch devices |
-
-**Note:** Orientation is NOT included because it can change during gameplay.
-
-#### Flow
+#### Current Flow
 
 ```
 1. Game calls: digitapSDK('setProgress', state, score, level)
-2. SDK computes: stateHash = securityBridge.computeStateHash(score)
-   ├── Flush input events → inputDigest
-   ├── Sample canvas → canvasHash
-   ├── Collect metadata → metaFingerprint
-   └── Hash all together
-3. SDK sends: SDK_PLAYER_SCORE_UPDATE { score, stateHash, ... }
-4. GameBox receives and includes stateHash in WebSocket message
-5. Backend can verify stateHash matches expected values
+2. SDK sends: SDK_PLAYER_SCORE_UPDATE { score, stateHash: '0x0', ... }
+3. Server validates via Lua script (rate limits, deltas, sequences)
+4. Behavioral sketch analyzed for bot patterns
 ```
 
 ---
@@ -421,16 +411,20 @@ Passively captures all user input events (touch, mouse) without interfering with
 
 | Feature | Value | Purpose |
 |---------|-------|---------|
-| `_MAX_BUFFER_SIZE` | 10,000 events | Prevent unbounded memory growth |
-| `_HOLD_THRESHOLD_MS` | 300ms | Detect long-press gestures |
+| `_MAX_BUFFER_SIZE` | 5,000 events | Prevent unbounded memory growth |
 | Event cleanup | `removeEventListener` on `stop()` | Prevent memory leaks |
+| No move events | `touchmove`/`mousemove` disabled | Reduce event volume on mobile |
 
-#### Digest Generation
+#### Output
 
-Events are serialized to canonical JSON and hashed with **keccak256** for integrity verification:
+Events are returned raw - **no client-side hashing** for performance:
 
 ```typescript
-const digest = keccak256(canonicalJSON(events));
+flush(): { events: InputEvent[]; digest: string } {
+  const events = this._normalize(this._buffer);
+  this._buffer = [];
+  return { events, digest: '0x0' }; // Backend computes hash if needed
+}
 ```
 
 ---
@@ -649,11 +643,11 @@ Even when using the legacy `_digitapUser` API, games automatically receive:
 
 | Feature | Description |
 |---------|-------------|
-| **stateHash** | Every `sendData()` includes cryptographic proof |
-| **Input Capture** | All touch/mouse events recorded |
-| **Canvas Sampling** | Game state verification |
-| **Rolling Hash** | Checkpoint chain integrity |
-| **Behavioral Fingerprint** | Anti-bot detection |
+| **Input Capture** | All touch/mouse events recorded for server analysis |
+| **Behavioral Fingerprint** | 64-byte sketch for anti-bot detection |
+| **Server Validation** | Rate limits, score deltas, sequence checks |
+
+> **Note:** Client-side hashing (stateHash, rolling hash) is disabled for performance. Security comes from server-side validation.
 
 ### Migration Path
 
@@ -678,18 +672,31 @@ Both APIs can coexist - the SDK handles routing internally.
 
 ## Cryptographic Design
 
-### Why keccak256?
+### Client-Side Hashing: DISABLED
 
-The SDK uses **keccak256** (via `@noble/hashes`) for all cryptographic operations:
+> **As of v3.4.0:** All client-side keccak256 hashing is **disabled** for performance. The SDK sends raw data and the backend computes hashes if needed.
 
-| Aspect | Choice | Rationale |
-|--------|--------|-----------|
-| Hash algorithm | keccak256 | Ethereum standard - backend uses same |
-| Library | @noble/hashes | Audited, pure JS, no WebAssembly |
-| Encoding | 0x-prefixed hex | Ethereum convention |
-| Verification | Deterministic | Same inputs = same hash on all platforms |
+| What | Before (v3.3) | Now (v3.4+) |
+|------|---------------|-------------|
+| `inputDigest` | keccak256(events) | `'0x0'` |
+| `canvasHash` | keccak256(samples) | `'0x0'` (sampling also disabled) |
+| `rollingHash` | keccak256(chain) | `'0x0'` |
+| `stateHash` | keccak256(all) | `'0x0'` |
 
-### Hash Functions
+### Why This Is OK
+
+Client-side cryptography is **security theater** against determined attackers:
+- Attackers who can modify JS can fake all hashes
+- Real security comes from server-side validation
+- Mobile performance is more important than fake security
+
+### What Remains
+
+The SDK still uses keccak256 for:
+- **Initial session hash** (once per session, not during gameplay)
+- **Deterministic random** for canvas sampling points (when enabled)
+
+### Hash Functions (Available but Rarely Used)
 
 **Location:** `src/security/utils.ts`
 
@@ -699,30 +706,15 @@ function keccak256(message: string): string
 
 // Bytes → 0x-prefixed hash
 function keccak256Bytes(data: Uint8Array): string
-
-// Bytes → raw bytes (for chaining)
-function keccak256Raw(data: Uint8Array): Uint8Array
-```
-
-### Deterministic Random
-
-Used for canvas sampling to ensure GameBox and backend can verify the same points:
-
-```typescript
-function deterministicRandom(seed: string, index: number): number {
-  const hash = keccak256(seed + index.toString());
-  return parseInt(hash.slice(2, 10), 16);
-}
 ```
 
 ### Canonical JSON
 
-For hash consistency across platforms, objects are serialized with **recursively sorted keys**:
+Still available for backend use if needed:
 
 ```typescript
 function canonicalJSON(obj: unknown): string {
   return JSON.stringify(obj, (_, value) => {
-    // Only sort object keys, not arrays
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const sorted: Record<string, unknown> = {};
       for (const key of Object.keys(value).sort()) {
@@ -735,65 +727,32 @@ function canonicalJSON(obj: unknown): string {
 }
 ```
 
-> **Critical:** This handles nested objects. A naive `Object.keys().sort()` only sorts top-level keys.
-
 ---
 
 ## Checkpoint Protocol
 
-The checkpoint protocol creates a cryptographic chain of security evidence that prevents manipulation.
+The checkpoint protocol collects security evidence for server-side validation.
 
-### Rolling Hash Chain
+> **Note:** As of v3.4.0, client-side hash computation is **disabled** for performance. The SDK sends raw data and the backend can compute hashes if needed.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Rolling Hash Chain                                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  H₀ = keccak256(sessionId || screenW || screenH || ts)                  │
-│                              │                                          │
-│                              ▼                                          │
-│  H₁ = keccak256(H₀ || nonceW₀ || inputDigest₁ || canvasHash₁ || score₁) │
-│                              │                                          │
-│                              ▼                                          │
-│  H₂ = keccak256(H₁ || nonceW₁ || inputDigest₂ || canvasHash₂ || score₂) │
-│                              │                                          │
-│                              ▼                                          │
-│                            ...                                          │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+### What Gets Collected
 
-### Rolling Hash Formula
+| Data | Source | Purpose |
+|------|--------|---------|
+| `events` | InputCapture | Raw input events for replay/analysis |
+| `sketch` | SketchBuilder | 64-byte behavioral fingerprint |
+| `windowIndex` | Counter | Track checkpoint sequence |
+| `inputDigest` | `'0x0'` | Placeholder (backend computes if needed) |
+| `canvasHash` | `'0x0'` | Placeholder (sampling disabled by default) |
+| `rollingHash` | `'0x0'` | Placeholder (backend computes if needed) |
 
-```
-H[w] = keccak256(H[w-1] | nonceW[w-1] | inputDigest[w] | canvasHash[w] | score[w])
-```
-
-Where:
-- `H[w-1]` = Previous rolling hash (or initial hash for w=1)
-- `nonceW[w-1]` = Server-provided nonce from previous checkpoint ACK
-- `inputDigest[w]` = keccak256 of input events in this window
-- `canvasHash[w]` = keccak256 of canvas samples
-- `score[w]` = Current score
-
-### What This Prevents
-
-| Attack | How Rolling Hash Prevents |
-|--------|--------------------------|
-| **Window omission** | Skipping a window breaks the chain - H[w+1] won't match |
-| **Replay attacks** | Server nonce is unique per window |
-| **Score manipulation** | Score is included in hash - tampering detected |
-| **Event fabrication** | inputDigest ties events to specific window |
-| **Canvas spoofing** | canvasHash verifies game state |
-
-### Checkpoint Flow
+### Checkpoint Flow (Simplified)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 1. GameBox → SDK: SDK_SESSION_INIT { sessionId }                        │
 │                                                                         │
-│ 2. SDK computes initial hash:                                           │
+│ 2. SDK computes initial hash (once per session, OK for performance):    │
 │    H₀ = keccak256(sessionId || screenW || screenH || ts)                │
 │                                                                         │
 │ 3. SDK → GameBox: SDK_SESSION_INIT_ACK { initialHash, meta }            │
@@ -801,57 +760,44 @@ Where:
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ DURING GAMEPLAY (every N seconds or on score change)                    │
+│ DURING GAMEPLAY (every N seconds)                                       │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │ 4. GameBox → SDK: SDK_CHECKPOINT_REQUEST { seed, nonceW, score }        │
 │                                                                         │
-│ 5. SDK collects:                                                        │
-│    • Flush input events → inputDigest                                   │
-│    • Sample canvas at seed points → canvasHash                          │
-│    • Build behavioral sketch → sketch, then RESET for next window       │
-│    • Compute: H[w] = keccak256(H[w-1] || nonceW || ... )                │
+│ 5. SDK collects (FAST - no hashing):                                    │
+│    • Flush input events → events[]                                      │
+│    • Build behavioral sketch → sketch                                   │
+│    • Reset sketch for next window                                       │
+│    • Increment windowIndex                                              │
 │                                                                         │
 │ 6. SDK → GameBox: SDK_CHECKPOINT_RESPONSE {                             │
-│      windowIndex, inputDigest, events, canvasHash, sample,              │
-│      rollingHash, sketch                                                │
+│      windowIndex,                                                       │
+│      inputDigest: '0x0',  // Backend computes                           │
+│      events,              // Raw data                                   │
+│      canvasHash: '0x0',   // Sampling disabled                          │
+│      sample: '',          // Empty                                      │
+│      rollingHash: '0x0',  // Backend computes                           │
+│      sketch               // Behavioral fingerprint                     │
 │    }                                                                    │
 │                                                                         │
-│ 7. GameBox → Backend: Forward checkpoint data                           │
-│                                                                         │
-│ 8. Backend validates and returns new nonceW                             │
-│                                                                         │
-│ 9. GameBox → SDK: SDK_CHECKPOINT_ACK { windowIndex, nonceW }            │
-│    (SDK stores nonceW for next rolling hash)                            │
+│ 7. Backend validates events, sketch, computes hashes if needed          │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Implementation
+### Backend Can Reconstruct Hashes
 
-**Location:** `src/security/utils.ts`
+If the backend needs to verify hash chains, it has all the raw data:
 
 ```typescript
-/**
- * Compute rolling hash for checkpoint chain.
- */
-export function computeRollingHash(
-  prevHash: string,
-  nonceW: string,
-  inputDigest: string,
-  canvasHash: string,
-  score: number
-): string {
-  const preimage = [
-    prevHash || '0x',
-    nonceW,
-    inputDigest,
-    canvasHash,
-    score.toString()
-  ].join('|');
-  
-  return keccak256(preimage);
-}
+// Backend (Node.js/TypeScript)
+import { keccak256 } from 'ethers';
+
+const inputDigest = keccak256(JSON.stringify(events));
+const rollingHash = keccak256(
+  `${prevHash}|${nonceW}|${inputDigest}|${canvasHash}|${score}`
+);
 ```
 
 ---
@@ -869,15 +815,19 @@ export function computeRollingHash(
 
 1. **Input Capture**: Records all touch/mouse events with timing
 2. **Behavioral Fingerprint**: 64-byte sketch detects automation patterns
-3. **Canvas Fingerprinting**: Samples game state at random points
-4. **Canvas Watermarking**: LSB steganography proves live gameplay
+3. **Canvas Fingerprinting**: Samples game state at random points (when enabled)
+4. **Canvas Watermarking**: LSB steganography proves live gameplay (when enabled)
 
-### Integrity Verification
+### Server-Side Validation (PRIMARY)
 
-1. **keccak256 Hashing**: Ethereum-compatible hashing throughout
-2. **Rolling Hash Chain**: Cryptographic chain prevents window omission
-3. **Server Nonces**: Prevents replay attacks
-4. **Canonical JSON**: Deterministic serialization for consistent hashes
+> **This is where real security happens.** Client-side crypto is disabled for performance.
+
+1. **Rate Limiting**: Max ticks per second, sliding window
+2. **Score Delta Validation**: Max score increase per tick
+3. **Monotonic Enforcement**: Score can never decrease
+4. **Sequence Validation**: No gaps, no replays, strict ordering
+5. **Session Binding**: Auth session must match game session
+6. **Behavioral Analysis**: Server analyzes sketch for bot patterns
 
 ---
 
@@ -937,11 +887,11 @@ interface CheckpointResponse {
   controller: '_digitapSecurity';
   type: 'SDK_CHECKPOINT_RESPONSE';
   windowIndex: number;      // Which window this is
-  inputDigest: string;      // keccak256 of input events
-  events: InputEvent[];     // Actual input events
-  canvasHash: string;       // keccak256 of canvas samples
-  sample: string;           // Raw canvas samples (hex)
-  rollingHash: string;      // H[w] for chain verification
+  inputDigest: string;      // Always '0x0' (backend computes if needed)
+  events: InputEvent[];     // Actual input events (raw data)
+  canvasHash: string;       // Always '0x0' (sampling disabled)
+  sample: string;           // Empty string
+  rollingHash: string;      // Always '0x0' (backend computes if needed)
   sketch: string;           // 64-byte behavioral fingerprint
 }
 ```
@@ -949,12 +899,12 @@ interface CheckpointResponse {
 ### Input Event Pipeline
 
 ```
-DOM Event
+DOM Event (touchstart, touchend, mousedown, mouseup, keydown, keyup)
     │
     ▼
 RawInputEvent (internal)
 {
-  type: 'touchstart' | 'mousemove' | ...
+  type: 'touchstart' | 'mousedown' | ...
   x: 523 (pixels)
   y: 301 (pixels)
   ts: 1234567.89 (performance.now)
@@ -973,8 +923,10 @@ InputEvent (normalized for backend)
 }
     │
     ▼
-digest = keccak256(canonicalJSON(events))
+Sent to backend as raw array (no client-side hashing)
 ```
+
+> **Note:** `touchmove` and `mousemove` events are NOT captured to reduce event volume on mobile.
 
 ---
 
@@ -1031,6 +983,7 @@ These require server-side validation and are handled by the GameBox/backend.
 
 | Version | Changes |
 |---------|---------|
+| 3.4.0 | **Performance release**: Disabled all client-side hashing (inputDigest, rollingHash, stateHash return '0x0'). Added death animation grace period (500ms). Added pending pause cancellation on restart/revive. Removed touchmove/mousemove capture. Reduced InputCapture buffer to 5000. |
 | 3.3.0 | WebGL canvas support (Construct 3), StateHash throttling (500ms), player death flow fix (no auto-reset), revive fix (afterStartGame called), SketchBuilder per-checkpoint reset, InputCapture memory leak fix, canonicalJSON recursive sort |
 | 3.2.0 | Added connection retry mechanism (10 retries, 500ms interval, 5s timeout) |
 | 3.1.0 | Added backward compatibility layer for `_digitapUser` (v1.0.0 API), dual protocol support |
@@ -1040,13 +993,25 @@ These require server-side validation and are handled by the GameBox/backend.
 
 ### Compatibility Matrix
 
-| SDK Version | `_digitapUser` API | `digitapSDK()` API | Security Features |
-|-------------|--------------------|--------------------|-------------------|
+| SDK Version | `_digitapUser` API | `digitapSDK()` API | Security Model |
+|-------------|--------------------|--------------------|----------------|
 | 1.0.0 | ✅ Native | ❌ | Basic |
 | 2.0.0 | ❌ | ✅ Native | Input + Canvas |
-| 3.0.0 | ❌ | ✅ Native | Full (keccak256, rolling hash) |
-| 3.1.0+ | ✅ Shim | ✅ Native | Full (all features) |
-| 3.3.0+ | ✅ Shim | ✅ Native | Full + WebGL + Throttling |
+| 3.0.0 | ❌ | ✅ Native | Client-side hashing |
+| 3.1.0+ | ✅ Shim | ✅ Native | Client-side hashing |
+| 3.4.0+ | ✅ Shim | ✅ Native | **Server-side validation** (no client hashing) |
+
+### v3.4.0 Breaking Changes
+
+The following fields now always return `'0x0'`:
+- `inputDigest` in checkpoint responses
+- `canvasHash` in checkpoint responses  
+- `rollingHash` in checkpoint responses
+- `stateHash` in score updates
+
+**Backend impact:** If your backend validates these hashes, you need to either:
+1. Compute the hashes server-side from raw data (events, canvas samples)
+2. Skip hash validation entirely and rely on rate limiting + behavioral analysis
 
 ---
 
