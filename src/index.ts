@@ -46,10 +46,6 @@ class DigitapGamePlayerSDK {
 
   private static _allowedOrigins: string[] = ALLOWED_ORIGINS;
 
-  // Throttle stateHash computation to avoid lag on frequent setProgress calls
-  private static _lastStateHashTime: number = 0;
-  private static _lastStateHash: string = '0x';
-  private static readonly _STATE_HASH_THROTTLE_MS = 500;
 
   /**
    * Start the connection handshake with GameBox.
@@ -135,6 +131,12 @@ class DigitapGamePlayerSDK {
     state: null,
     continueScore: 0,
   };
+
+  // Grace period after player death to allow death animation to complete
+  // GameBox sends SDK_PAUSE_GAME immediately, but we delay it so animation can finish
+  private static _deathGracePeriodMs = 500;
+  private static _deathTimestamp = 0;
+  private static _pendingPauseTimeout: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Call a method from the class through a queue.
@@ -251,24 +253,13 @@ class DigitapGamePlayerSDK {
 
   /**
    * Set progress of a game.
-   * Computes stateHash from input events and canvas state for integrity verification.
-   * StateHash computation is throttled to avoid lag on frequent calls.
+   * NOTE: stateHash is NOT computed here to avoid performance issues on mobile.
+   * stateHash is only computed on significant events (setLevelUp, setPlayerFailed).
    */
   public static setProgress(state: string, score: number, level: number): void {
     log.info(`setProgress: state=${state}, score=${score}, level=${level}`);
     
-    // Throttle stateHash computation to avoid lag
-    // Only recompute if enough time has passed since last computation
-    const now = Date.now();
-    let stateHash = this._lastStateHash;
-    
-    if (now - this._lastStateHashTime >= this._STATE_HASH_THROTTLE_MS) {
-      stateHash = securityBridge.computeStateHash(score);
-      this._lastStateHash = stateHash;
-      this._lastStateHashTime = now;
-    }
-    
-    // Set the current progress with stateHash
+    // Set the current progress (no stateHash - too expensive for frequent calls)
     this._progress = {
       type: 'SDK_PLAYER_SCORE_UPDATE',
       state,
@@ -276,7 +267,6 @@ class DigitapGamePlayerSDK {
       level,
       continueScore: score,
       controller: '_digitapGame',
-      stateHash,
     };
 
     this._sendData();
@@ -305,6 +295,9 @@ class DigitapGamePlayerSDK {
    */
   public static setPlayerFailed(state: string = 'FAIL'): void {
     log.info(`setPlayerFailed: state=${state}`);
+    
+    // Mark death timestamp - used to delay SDK_PAUSE_GAME so death animation can play
+    this._deathTimestamp = Date.now();
     
     // Capture score BEFORE setting to 0 for stateHash computation
     const scoreAtDeath = this._progress.score;
@@ -388,20 +381,48 @@ class DigitapGamePlayerSDK {
             self.afterStartGame();
             break;
 
-          case 'SDK_PAUSE_GAME':
-            log.info('📢 Calling afterPauseGame()');
-            self.afterPauseGame();
+          case 'SDK_PAUSE_GAME': {
+            // If player just died, delay the pause so death animation can complete
+            const timeSinceDeath = Date.now() - self._deathTimestamp;
+            if (self._deathTimestamp > 0 && timeSinceDeath < self._deathGracePeriodMs) {
+              const delay = self._deathGracePeriodMs - timeSinceDeath;
+              log.info(`📢 Delaying afterPauseGame() by ${delay}ms for death animation`);
+              // Cancel any existing pending pause
+              if (self._pendingPauseTimeout) {
+                clearTimeout(self._pendingPauseTimeout);
+              }
+              self._pendingPauseTimeout = setTimeout(() => {
+                self._pendingPauseTimeout = null;
+                self._deathTimestamp = 0; // Reset
+                self.afterPauseGame();
+              }, delay);
+            } else {
+              // Clear stale death timestamp if grace period already passed
+              self._deathTimestamp = 0;
+              log.info('📢 Calling afterPauseGame()');
+              self.afterPauseGame();
+            }
             break;
+          }
 
           // NEW protocol
           case 'SDK_START_GAME_FROM_ZERO':
           // OLD protocol (backward compat)
           case 'startGameFromZero':
             log.info('📢 Resetting progress and calling afterStartGameFromZero()');
+            // Cancel any pending pause from death grace period
+            if (self._pendingPauseTimeout) {
+              clearTimeout(self._pendingPauseTimeout);
+              self._pendingPauseTimeout = null;
+            }
+            self._deathTimestamp = 0; // Clear death state
             self._progress.score = 0;
             self._progress.level = 0;
             self._progress.continueScore = 0;
             self.afterStartGameFromZero();
+            // After reset, start the game (game was paused by SDK_PAUSE_GAME)
+            log.info('📢 Calling afterStartGame() to start');
+            self.afterStartGame();
             break;
 
           // NEW protocol
@@ -409,15 +430,20 @@ class DigitapGamePlayerSDK {
           // OLD protocol (backward compat)
           case 'continueWithCurrentScore':
             log.info(`📢 Continuing with score=${self._progress.continueScore}, level=${self._progress.level}`);
+            // Cancel any pending pause from death grace period
+            if (self._pendingPauseTimeout) {
+              clearTimeout(self._pendingPauseTimeout);
+              self._pendingPauseTimeout = null;
+            }
+            self._deathTimestamp = 0; // Clear death state
             self._progress.score = self._progress.continueScore;
-            // First restore the score via afterContinueWithCurrentScore
+            // Restore score via callback - game resumes itself in this callback
             self.afterContinueWithCurrentScore(
               self._progress.score,
               self._progress.level
             );
-            // Then start/resume the game (game was paused by SDK_PAUSE_GAME)
-            log.info('📢 Calling afterStartGame() to resume');
-            self.afterStartGame();
+            // NOTE: Do NOT call afterStartGame() here - legacy games resume 
+            // in their _afterContinueWithCurrentScore callback
             break;
         }
       },
@@ -851,12 +877,15 @@ DigitapGamePlayerSDK.afterStartGameFromZero = function () {
 
 DigitapGamePlayerSDK.afterContinueWithCurrentScore = function (score: number, level: number) {
   log.info('🔄 Forwarding afterContinueWithCurrentScore to legacy _digitapUser', { score, level });
-  // Legacy games: _digitapUser.progress values are set via sendData()
-  // Modern games: _digitapUser.progress may be stale, use passed parameters as fallback
-  const finalScore = _digitapUser.progress.continueScore || score;
-  const finalLevel = _digitapUser.progress.level ?? level;
-  _digitapUser.progress.score = finalScore;
-  _digitapUser.progress.level = finalLevel;
+  // Sync _digitapUser.progress with SDK state for legacy games that read it directly
+  // Use continueScore if set (legacy games set this), otherwise use passed score
+  // Note: Using ?? instead of || to handle continueScore=0 correctly
+  _digitapUser.progress.score = _digitapUser.progress.continueScore ?? score;
+  _digitapUser.progress.continueScore = _digitapUser.progress.score;
+  // Level: preserve legacy value if set, otherwise use passed level
+  if (typeof _digitapUser.progress.level === 'undefined' || _digitapUser.progress.level === 0) {
+    _digitapUser.progress.level = level;
+  }
   _digitapUser._afterContinueWithCurrentScore();
 };
 
