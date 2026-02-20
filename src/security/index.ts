@@ -1,12 +1,12 @@
 /**
- * Security Module Exports
- * 
- * Re-exports all security modules for easy importing.
+ * Security Module Exports (SDK Shim)
+ *
+ * Only exports the thin shim modules that run inside the game iframe.
+ * All crypto/hashing/sketch logic lives in src/worker/ (Security Worker).
  */
 
 export { SecurityBridge } from './SecurityBridge';
 export { InputCapture } from './InputCapture';
 export { CanvasHandler } from './CanvasHandler';
-export { SketchBuilder } from './SketchBuilder';
 export { MetadataCollector } from './MetadataCollector';
 export { log } from './logger';

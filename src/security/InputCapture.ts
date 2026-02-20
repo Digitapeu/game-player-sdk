@@ -1,172 +1,159 @@
 /**
- * InputCapture Module
- * 
- * Captures all user input events passively and provides:
- * - Raw events array with normalized coordinates (0-1)
- * - Backend can compute digest if needed for verification
+ * InputCapture (SDK Shim)
+ *
+ * Passively captures raw input events with minimal overhead.
+ * Returns compact tuples - NO normalization, NO hashing, NO digest.
+ * All processing happens in the Security Worker.
+ *
+ * Listens for ALL input event types to cover every game engine:
+ *   - Pointer Events (Construct 3, Phaser 3, Unity WebGL, modern engines)
+ *   - Touch Events (older engines, mobile-specific code)
+ *   - Mouse Events (desktop fallback, legacy engines)
+ *
+ * A single physical tap can fire pointerdown → touchstart → mousedown
+ * within ~1-5ms. We deduplicate by tracking the last down/up timestamp
+ * and dropping events within a 30ms window.
+ *
+ * All listeners use { capture: true } to fire in the capture phase
+ * (top-down), before game engines can call stopPropagation().
  */
 
-import type { InputEvent, RawInputEvent } from '../types';
+import type { RawEventTuple } from '../worker/types';
 import { log } from './logger';
 
+const DOWN_EVENTS = ['pointerdown', 'touchstart', 'mousedown'] as const;
+const UP_EVENTS = ['pointerup', 'touchend', 'mouseup'] as const;
+const ALL_EVENTS = [...DOWN_EVENTS, ...UP_EVENTS] as const;
+
 export class InputCapture {
-  private _buffer: RawInputEvent[] = [];
-  private _lastEventTime = 0;
-  private _activePointers = new Map<number, { startTime: number; x: number; y: number }>();
+  private _buffer: RawEventTuple[] = [];
   private _isStarted = false;
   private _boundCapture: (e: Event) => void;
 
-  private static readonly _MAX_BUFFER_SIZE = 5000; // Prevent unbounded growth
+  // Dedup: a physical tap fires pointerdown→touchstart→mousedown within ~1-5ms.
+  // Track last down/up timestamp separately to keep only the first of each.
+  private _lastDownTs = 0;
+  private _lastUpTs = 0;
+
+  private _canvas: HTMLCanvasElement | null = null;
+  private _canvasPollTimer: number | null = null;
+
+  private static readonly _MAX_BUFFER = 5000;
+  private static readonly _DEDUP_MS = 30;
 
   constructor() {
-    // Bind once so we can remove later
     this._boundCapture = (e: Event) => this._capture(e);
   }
 
-  /**
-   * Start capturing input events.
-   * NOTE: We only capture start/end events, NOT move events (too frequent on mobile).
-   */
   start(): void {
-    if (this._isStarted) {
-      return;
-    }
+    if (this._isStarted) return;
     this._isStarted = true;
 
-    // Only capture tap/release - NOT move events (they fire 60+ fps and kill mobile)
-    const events = ['touchstart', 'touchend', 'mousedown', 'mouseup'];
-    events.forEach(type => {
-      window.addEventListener(type, this._boundCapture, { passive: true });
+    ALL_EVENTS.forEach(type => {
+      window.addEventListener(type, this._boundCapture, { capture: true, passive: true });
     });
-    log.info(`InputCapture listening for: ${events.join(', ')}`);
 
-    // Hold detection only runs when there are active pointers (lazy)
-    // No interval needed - we detect holds on flush
+    this._pollForCanvas();
+    log.info('InputCapture listening (capture phase) for:', ALL_EVENTS.join(', '));
   }
 
-  /**
-   * Stop capturing input events.
-   */
   stop(): void {
     if (!this._isStarted) return;
     this._isStarted = false;
 
-    // Remove event listeners
-    const events = ['touchstart', 'touchend', 'mousedown', 'mouseup'];
-    events.forEach(type => {
-      window.removeEventListener(type, this._boundCapture);
+    ALL_EVENTS.forEach(type => {
+      window.removeEventListener(type, this._boundCapture, { capture: true } as EventListenerOptions);
     });
 
-    // Clear state
-    this._activePointers.clear();
+    this._detachCanvas();
+
+    if (this._canvasPollTimer !== null) {
+      clearInterval(this._canvasPollTimer);
+      this._canvasPollTimer = null;
+    }
+
     this._buffer = [];
-    this._lastEventTime = 0;
   }
 
-  /**
-   * Capture a DOM event and add to buffer.
-   */
+  flush(): RawEventTuple[] {
+    const out = this._buffer;
+    this._buffer = [];
+    return out;
+  }
+
   private _capture(e: Event): void {
+    if (this._buffer.length >= InputCapture._MAX_BUFFER) return;
+
     const now = performance.now();
-    const dt = this._lastEventTime > 0 ? now - this._lastEventTime : 0;
-    this._lastEventTime = now;
+    const type = e.type;
 
-    const raw: RawInputEvent = {
-      type: e.type,
-      ts: now,
-      dt,
-      pointerId: 0
-    };
+    // Classify as down (tap) or up (release)
+    const isDown = type === 'pointerdown' || type === 'touchstart' || type === 'mousedown';
 
-    // Extract coordinates from mouse events
-    if ('clientX' in e) {
-      raw.x = (e as MouseEvent).clientX;
-      raw.y = (e as MouseEvent).clientY;
+    // Dedup: drop if same action class fired within 30ms (pointer→touch→mouse chain)
+    if (isDown) {
+      if ((now - this._lastDownTs) < InputCapture._DEDUP_MS) return;
+      this._lastDownTs = now;
+    } else {
+      if ((now - this._lastUpTs) < InputCapture._DEDUP_MS) return;
+      this._lastUpTs = now;
     }
 
-    // Extract coordinates from touch events
-    if ('touches' in e) {
+    let x = 0, y = 0;
+
+    // Pointer Events (highest priority - most modern engines)
+    if ('clientX' in e && 'pointerId' in e) {
+      x = (e as PointerEvent).clientX;
+      y = (e as PointerEvent).clientY;
+    }
+    // Touch Events
+    else if ('touches' in e) {
       const touches = (e as TouchEvent).touches;
-      const changedTouches = (e as TouchEvent).changedTouches;
-      
-      // For touchend, use changedTouches since touches will be empty
-      const touchList = touches.length > 0 ? touches : changedTouches;
-      
-      if (touchList.length > 0) {
-        const touch = touchList[0];
-        raw.x = touch.clientX;
-        raw.y = touch.clientY;
-        raw.pointerId = touch.identifier;
+      const changed = (e as TouchEvent).changedTouches;
+      const list = touches.length > 0 ? touches : changed;
+      if (list.length > 0) {
+        x = list[0].clientX;
+        y = list[0].clientY;
       }
     }
-
-    // Get pointerId for pointer events
-    if ('pointerId' in e) {
-      raw.pointerId = (e as PointerEvent).pointerId;
+    // Mouse Events
+    else if ('clientX' in e) {
+      x = (e as MouseEvent).clientX;
+      y = (e as MouseEvent).clientY;
     }
 
-    // Track active pointers for hold detection
-    if (e.type === 'touchstart' || e.type === 'mousedown') {
-      if (raw.x !== undefined && raw.y !== undefined) {
-        this._activePointers.set(raw.pointerId, { startTime: now, x: raw.x, y: raw.y });
+    this._buffer.push({ t: now, x, y, e: isDown ? 1 : 0 });
+  }
+
+  private _pollForCanvas(): void {
+    this._tryAttachCanvas();
+
+    this._canvasPollTimer = window.setInterval(() => {
+      if (this._canvas) {
+        clearInterval(this._canvasPollTimer!);
+        this._canvasPollTimer = null;
+        return;
       }
-    } else if (e.type === 'touchend' || e.type === 'mouseup') {
-      this._activePointers.delete(raw.pointerId);
-    }
-
-    // Prevent unbounded buffer growth
-    if (this._buffer.length < InputCapture._MAX_BUFFER_SIZE) {
-      this._buffer.push(raw);
-    }
+      this._tryAttachCanvas();
+    }, 500);
   }
 
-  /**
-   * Flush the event buffer and return normalized events.
-   * Note: Hash computation skipped for performance - backend can hash if needed.
-   */
-  flush(): { events: InputEvent[]; digest: string } {
-    const events = this._normalize(this._buffer);
-    this._buffer = [];
-    return { events, digest: '0x0' }; // Backend computes hash if needed
+  private _tryAttachCanvas(): void {
+    const canvas = document.querySelector('canvas');
+    if (!canvas || canvas === this._canvas) return;
+
+    this._canvas = canvas;
+    ALL_EVENTS.forEach(type => {
+      canvas.addEventListener(type, this._boundCapture, { capture: true, passive: true });
+    });
+    log.info('InputCapture attached to canvas element');
   }
 
-  /**
-   * Get events without flushing (for sketch building).
-   */
-  getEvents(): RawInputEvent[] {
-    return [...this._buffer];
-  }
-
-  /**
-   * Normalize raw events to backend format.
-   */
-  private _normalize(raw: RawInputEvent[]): InputEvent[] {
-    const w = window.innerWidth || 1;
-    const h = window.innerHeight || 1;
-
-    return raw.map(e => ({
-      type: this._mapType(e.type),
-      x: e.x !== undefined ? e.x / w : 0,
-      y: e.y !== undefined ? e.y / h : 0,
-      dt: Math.round(e.dt),
-      pointerId: e.pointerId ?? 0
-    }));
-  }
-
-  /**
-   * Map DOM event type to backend event type.
-   * Note: Only tap/release captured now (move events removed for performance).
-   */
-  private _mapType(domType: string): 'tap' | 'release' {
-    switch (domType) {
-      case 'touchstart':
-      case 'mousedown':
-        return 'tap';
-      case 'touchend':
-      case 'mouseup':
-        return 'release';
-      default:
-        return 'tap';
-    }
+  private _detachCanvas(): void {
+    if (!this._canvas) return;
+    ALL_EVENTS.forEach(type => {
+      this._canvas!.removeEventListener(type, this._boundCapture, { capture: true } as EventListenerOptions);
+    });
+    this._canvas = null;
   }
 }

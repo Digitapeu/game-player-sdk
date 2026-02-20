@@ -3,20 +3,21 @@ import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-clo
 import { cloudflare, CLOUDFLARE_ZONE_ID } from '../config/cloudflare'
 
 // ── Targets ──────────────────────────────────────────────────────────
-const CLOUDFRONT_PATHS  = ['/sdk/main.min.js', '/sdk/main.min.4.js','/sdk/dist/main.min.js', '/sdk/dist/main.min.4.js']
-const CDN_URLS          = [
+const CLOUDFRONT_PATHS = [
+    '/sdk/main.min.js',
+    '/sdk/main.min.4.js',
+    '/sdk/dist/main.min.js',
+    '/sdk/dist/main.min.4.js',
+    '/sdk/security-worker.min.js',
+    '/sdk/dist/security-worker.min.js',
+]
+const CDN_URLS = [
     'https://files.digitap.eu/sdk/main.min.js',
     'https://files.digitap.eu/sdk/main.min.4.js',
     'https://files.digitap.eu/sdk/dist/main.min.js',
     'https://files.digitap.eu/sdk/dist/main.min.4.js',
-    // 'https://game.digitap.eu/49e3f303-77db-5f02-ba67-58592670e0f6/index.html', // flippy bottle 
-    // 'https://game.digitap.eu/49e3f303-77db-5f02-ba67-58592670e0f6/scripts/c3runtime.js', // flippy bottle
-    // 'https://game.digitap.eu/bee185ab-1378-5fd1-be8b-f399f9d3653f/index.html', // crazy bouncing
-    // 'https://game.digitap.eu/bee185ab-1378-5fd1-be8b-f399f9d3653f/scripts/c3runtime.js', // crazy bouncing
-    // 'https://game.digitap.eu/fe0b0420-7d6e-5772-aa5f-55463d3753cf/index.html', // knife hit
-    // 'https://game.digitap.eu/fe0b0420-7d6e-5772-aa5f-55463d3753cf/scripts/c3runtime.js', // knife hit
-    // 'https://game.digitap.eu/6ee27935-172d-5d2e-9711-28533497c915/index.html', // zball
-    // 'https://game.digitap.eu/6ee27935-172d-5d2e-9711-28533497c915/c2runtime.js', // zball
+    'https://files.digitap.eu/sdk/security-worker.min.js',
+    'https://files.digitap.eu/sdk/dist/security-worker.min.js',
 ]
 
 // ── Env validation ───────────────────────────────────────────────────

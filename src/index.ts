@@ -138,6 +138,10 @@ class DigitapGamePlayerSDK {
   private static _deathTimestamp = 0;
   private static _pendingPauseTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // Deduplication guard - prevents duplicate postMessage calls
+  private static _lastSent: { type: string; score: number; ts: number } | null = null;
+  private static readonly _DEDUP_WINDOW_MS = 50; // Ignore same message within 50ms
+
   /**
    * Call a method from the class through a queue.
    */
@@ -253,13 +257,10 @@ class DigitapGamePlayerSDK {
 
   /**
    * Set progress of a game.
-   * NOTE: stateHash is NOT computed here to avoid performance issues on mobile.
-   * stateHash is only computed on significant events (setLevelUp, setPlayerFailed).
    */
   public static setProgress(state: string, score: number, level: number): void {
     log.info(`setProgress: state=${state}, score=${score}, level=${level}`);
     
-    // Set the current progress (no stateHash - too expensive for frequent calls)
     this._progress = {
       type: 'SDK_PLAYER_SCORE_UPDATE',
       state,
@@ -274,43 +275,29 @@ class DigitapGamePlayerSDK {
 
   /**
    * Set the new level of the game.
-   * Computes stateHash to prove level advancement was legitimate.
    */
   public static setLevelUp(level: number): void {
     log.info(`setLevelUp: level=${level}`);
     
-    // Compute stateHash at moment of level up
-    const stateHash = securityBridge.computeStateHash(this._progress.score);
-    
     this._progress.level = level;
     this._progress.type = 'SDK_PLAYER_LEVEL_UP';
-    this._progress.stateHash = stateHash;
 
     this._sendData();
   }
 
   /**
    * Set the game as failed (player death).
-   * Computes stateHash from input events and canvas state at death moment.
    */
   public static setPlayerFailed(state: string = 'FAIL'): void {
     log.info(`setPlayerFailed: state=${state}`);
     
-    // Mark death timestamp - used to delay SDK_PAUSE_GAME so death animation can play
     this._deathTimestamp = Date.now();
-    
-    // Capture score BEFORE setting to 0 for stateHash computation
     const scoreAtDeath = this._progress.score;
-    
-    // Compute stateHash at moment of death
-    // This proves the death was legitimate (not fabricated)
-    const stateHash = securityBridge.computeStateHash(scoreAtDeath);
     
     this._progress.state = state;
     this._progress.score = 0;
     this._progress.type = 'SDK_PLAYER_FAILED';
-    this._progress.stateHash = stateHash;
-    this._progress.continueScore = scoreAtDeath; // Preserve for potential revive
+    this._progress.continueScore = scoreAtDeath;
 
     this._sendData();
     // Do NOT auto-reset here - wait for parent to send:
@@ -320,9 +307,23 @@ class DigitapGamePlayerSDK {
 
   /**
    * Sends game data to parent platform.
+   * Includes deduplication to prevent double-sends from games using both old/new APIs.
    */
   private static _sendData(): void {
-    log.info(`Sending to parent: ${this._progress.type}`, this._progress);
+    const now = Date.now();
+    const { type, score } = this._progress;
+
+    // Dedupe: skip if same type+score sent within window
+    if (this._lastSent && 
+        this._lastSent.type === type && 
+        this._lastSent.score === score &&
+        (now - this._lastSent.ts) < this._DEDUP_WINDOW_MS) {
+      log.warn(`Skipping duplicate ${type} score=${score} (sent ${now - this._lastSent.ts}ms ago)`);
+      return;
+    }
+
+    this._lastSent = { type, score, ts: now };
+    log.info(`Sending to parent: ${type}`, this._progress);
     window.parent.postMessage(this._progress, this._origin ?? '*');
   }
 

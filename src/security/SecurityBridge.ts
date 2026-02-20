@@ -1,490 +1,151 @@
 /**
- * SecurityBridge Module
- * 
- * The main coordinator that listens for postMessage requests from GameBox (parent)
- * and responds with security data. Uses controller: '_digitapSecurity' to namespace
- * the protocol separately from the existing game protocol.
- * 
- * Performance Note:
- * Client-side hashing is DISABLED for performance. The SDK sends raw data and
- * the backend computes hashes if needed. Real security comes from server-side
- * validation (rate limits, deltas) and behavioral analysis (sketch fingerprint).
+ * SecurityBridge (SDK Shim)
+ *
+ * Ultra-thin bridge between game iframe and GameBox parent.
+ * NO crypto, NO hashing, NO sketch building, NO rolling state.
+ *
+ * Responsibilities:
+ *   1. Listen for postMessage requests from GameBox
+ *   2. Collect raw data (input events, canvas pixels, metadata)
+ *   3. Send raw data back to GameBox
+ *
+ * All computation happens in the Security Worker (GameBox side).
  */
-
-import type { 
-  SecurityRequest, 
-  SecurityResponse,
-  InputEventsResponse,
-  InputSketchResponse,
-  CanvasSampleResponse,
-  CanvasEmbedResponse,
-  MetaResponse,
-  CheckpointResponse,
-  SessionMeta
-} from '../types';
 
 import { InputCapture } from './InputCapture';
 import { CanvasHandler } from './CanvasHandler';
-import { SketchBuilder } from './SketchBuilder';
 import { MetadataCollector } from './MetadataCollector';
-import { computeInitialRollingHash } from './utils';
 import { log } from './logger';
 
-// ============================================================
-// Rolling Hash State (checkpoint chain integrity)
-// ============================================================
-
-interface RollingHashState {
-  sessionId: string;
-  currentHash: string;
-  windowIndex: number;
-  lastNonceW: string;
-}
-
 export class SecurityBridge {
-  private _inputCapture: InputCapture;
-  private _canvasHandler: CanvasHandler;
-  private _sketchBuilder: SketchBuilder;
-  private _metadataCollector: MetadataCollector;
+  private _input = new InputCapture();
+  private _canvas = new CanvasHandler();
+  private _meta = new MetadataCollector();
   private _isInitialized = false;
-
-  // Rolling hash state for checkpoint integrity
-  private _rollingState: RollingHashState | null = null;
-
-  // Connection state callback
   private _onSessionInitCallback: (() => void) | null = null;
 
   private static readonly _CONTROLLER = '_digitapSecurity';
-  private static readonly _ALLOWED_ORIGINS = [
-    'https://wam.app',
-    'https://app.wam.app',
-    'https://wam.eu',
-    'https://win.wam.app',
-    'https://play.wam.app',
-    'http://localhost:3000',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:8080'
+  private static readonly _VALID_TYPES = [
+    'SDK_SESSION_INIT',
+    'SDK_CHECKPOINT_REQUEST',
+    'SDK_CHECKPOINT_ACK',
+    'SDK_CANVAS_EMBED_REQUEST',
+    'SDK_META_REQUEST',
   ];
 
-  constructor() {
-    this._inputCapture = new InputCapture();
-    this._canvasHandler = new CanvasHandler();
-    this._sketchBuilder = new SketchBuilder();
-    this._metadataCollector = new MetadataCollector();
-  }
-
-  /**
-   * Register a callback to be called when session is initialized.
-   * Used by main SDK to track connection state.
-   */
   onSessionInit(callback: () => void): void {
     this._onSessionInitCallback = callback;
   }
 
-  /**
-   * Check if a session has been initialized.
-   */
-  get isSessionActive(): boolean {
-    return this._rollingState !== null;
-  }
-
-  /**
-   * Initialize the security bridge.
-   * This should be called during SDK init.
-   */
   init(): void {
-    if (this._isInitialized) {
-      log.warn('SecurityBridge already initialized, skipping');
-      return;
-    }
+    if (this._isInitialized) return;
     this._isInitialized = true;
 
-    log.info('🚀 Initializing SecurityBridge...');
-    
-    // Start capturing input events
-    this._inputCapture.start();
-    log.info('✓ InputCapture started');
-    
-    // Start looking for canvas
-    this._canvasHandler.start();
-    log.info('✓ CanvasHandler started');
-    
-    // Listen for security requests from parent
-    this._listenForRequests();
-    log.info('✓ Listening for postMessage requests from parent');
-    log.info('✓ Allowed origins:', SecurityBridge._ALLOWED_ORIGINS);
-    log.info('🎮 SecurityBridge ready!');
+    this._input.start();
+    this._canvas.start();
+    this._listen();
+
+    log.info('SecurityBridge ready (shim mode - no crypto)');
   }
 
-  /**
-   * Stop the security bridge.
-   */
   stop(): void {
     if (!this._isInitialized) return;
     this._isInitialized = false;
-
-    this._inputCapture.stop();
-    this._canvasHandler.stop();
-    this._rollingState = null;
+    this._input.stop();
+    this._canvas.stop();
   }
 
-  /**
-   * Listen for postMessage requests from parent (GameBox only).
-   */
-  private _listenForRequests(): void {
+  private _listen(): void {
     window.addEventListener('message', (event) => {
-      // STRICT FILTER 1: Only accept messages from parent window (GameBox)
-      if (event.source !== window.parent) {
-        return; // Silently ignore - not from GameBox
-      }
+      if (event.source !== window.parent) return;
 
-      // STRICT FILTER 2: Validate origin FIRST (security best practice)
-      if (!SecurityBridge._ALLOWED_ORIGINS.includes(event.origin)) {
-        log.warn(`❌ Rejected request from unauthorized origin: ${event.origin}`);
-        return;
-      }
-
-      // STRICT FILTER 3: Must be a valid object
       const data = event.data;
-      if (!data || typeof data !== 'object') {
-        return; // Silently ignore - malformed
+      if (!data || typeof data !== 'object') return;
+      if (data.controller !== SecurityBridge._CONTROLLER) return;
+      if (!SecurityBridge._VALID_TYPES.includes(data.type)) return;
+
+      log.request(data.type);
+
+      try {
+        this._handle(event);
+      } catch {
+        // Security shim must never crash the game
       }
-
-      // STRICT FILTER 4: Must be our security controller
-      if (data.controller !== SecurityBridge._CONTROLLER) {
-        return; // Silently ignore - different protocol channel
-      }
-
-      // STRICT FILTER 5: Must have a valid request type
-      const validTypes = [
-        'SDK_INPUT_EVENTS_REQUEST',
-        'SDK_INPUT_SKETCH_REQUEST', 
-        'SDK_CANVAS_SAMPLE_REQUEST',
-        'SDK_CANVAS_EMBED_REQUEST',
-        'SDK_META_REQUEST',
-        'SDK_SESSION_INIT',
-        'SDK_CHECKPOINT_REQUEST',
-        'SDK_CHECKPOINT_ACK'
-      ];
-      if (!validTypes.includes(data.type)) {
-        log.warn(`Unknown security request type: ${data.type}`);
-        return;
-      }
-
-      log.request(data.type, { origin: event.origin });
-
-      // Handle the request
-      this._handleRequest(event);
     });
 
-    // Send ready signal to parent
-    this._sendReady();
+    window.parent.postMessage({
+      controller: SecurityBridge._CONTROLLER,
+      type: 'SDK_SECURITY_READY',
+      ts: Date.now()
+    }, '*');
   }
 
-  /**
-   * Notify parent that security bridge is ready.
-   */
-  private _sendReady(): void {
-    try {
-      window.parent.postMessage({
-        controller: SecurityBridge._CONTROLLER,
-        type: 'SDK_SECURITY_READY',
-        ts: Date.now()
-      }, '*');
-      log.info('📤 Sent SDK_SECURITY_READY to parent');
-    } catch (err) {
-      log.error('Failed to send SDK_SECURITY_READY', err);
-    }
-  }
-
-  /**
-   * Handle a security request from parent.
-   */
-  private _handleRequest(event: MessageEvent<SecurityRequest>): void {
+  private _handle(event: MessageEvent): void {
     const { type } = event.data;
 
-    try {
-      switch (type) {
-        case 'SDK_INPUT_EVENTS_REQUEST':
-          this._handleInputEventsRequest(event);
-          break;
-
-        case 'SDK_INPUT_SKETCH_REQUEST':
-          this._handleInputSketchRequest(event);
-          break;
-
-        case 'SDK_CANVAS_SAMPLE_REQUEST':
-          this._handleCanvasSampleRequest(event);
-          break;
-
-        case 'SDK_CANVAS_EMBED_REQUEST':
-          this._handleCanvasEmbedRequest(event);
-          break;
-
-        case 'SDK_META_REQUEST':
-          this._handleMetaRequest(event);
-          break;
-
-        case 'SDK_SESSION_INIT':
-          this._handleSessionInit(event);
-          break;
-
-        case 'SDK_CHECKPOINT_REQUEST':
-          this._handleCheckpointRequest(event);
-          break;
-
-        case 'SDK_CHECKPOINT_ACK':
-          this._handleCheckpointAck(event);
-          break;
-
-        default:
-          // Unknown request type - ignore
-          break;
+    switch (type) {
+      case 'SDK_SESSION_INIT': {
+        const meta = this._meta.collect();
+        this._respond(event, {
+          controller: SecurityBridge._CONTROLLER,
+          type: 'SDK_SESSION_INIT_ACK',
+          meta,
+          ts: Date.now()
+        });
+        this._onSessionInitCallback?.();
+        break;
       }
-    } catch (err) {
-      // Silently ignore errors - security modules should never crash the game
-      log.error('Error handling request', err);
+
+      case 'SDK_CHECKPOINT_REQUEST': {
+        const { seed, skipCanvas } = event.data;
+        const events = this._input.flush();
+        const pixels = skipCanvas !== false ? null : this._canvas.sampleRaw(seed ?? 0);
+
+        this._respond(event, {
+          controller: SecurityBridge._CONTROLLER,
+          type: 'SDK_CHECKPOINT_RESPONSE',
+          events,
+          pixels,
+          eventCount: events.length,
+          screenW: window.innerWidth,
+          screenH: window.innerHeight
+        });
+        break;
+      }
+
+      case 'SDK_CANVAS_EMBED_REQUEST': {
+        const { data } = event.data;
+        const ok = data instanceof Uint8Array
+          ? this._canvas.embedWatermark(data)
+          : false;
+
+        this._respond(event, {
+          controller: SecurityBridge._CONTROLLER,
+          type: 'SDK_CANVAS_EMBED_RESPONSE',
+          success: ok
+        });
+        break;
+      }
+
+      case 'SDK_META_REQUEST': {
+        this._respond(event, {
+          controller: SecurityBridge._CONTROLLER,
+          type: 'SDK_META_RESPONSE',
+          meta: this._meta.collect()
+        });
+        break;
+      }
+
+      case 'SDK_CHECKPOINT_ACK':
+        break;
     }
   }
 
-  /**
-   * Respond to a request.
-   */
-  private _respond(event: MessageEvent, response: SecurityResponse): void {
+  private _respond(event: MessageEvent, response: Record<string, unknown>): void {
     try {
-      log.response(response.type, response);
       (event.source as Window).postMessage(response, event.origin);
-    } catch (err) {
-      log.error('Failed to send response', err);
+    } catch {
+      // Silently fail
     }
-  }
-
-  // ============================================================
-  // Session & Rolling Hash Handlers
-  // ============================================================
-
-  /**
-   * Initialize session and rolling hash state.
-   * Called by GameBox when session starts.
-   */
-  private _handleSessionInit(event: MessageEvent): void {
-    const { sessionId } = event.data as { sessionId: string };
-    
-    if (!sessionId) {
-      log.error('SDK_SESSION_INIT missing sessionId');
-      return;
-    }
-
-    const meta = this._metadataCollector.collect();
-    const initialHash = computeInitialRollingHash(
-      sessionId,
-      meta.screenW,
-      meta.screenH,
-      Date.now()
-    );
-
-    this._rollingState = {
-      sessionId,
-      currentHash: initialHash,
-      windowIndex: 0,
-      lastNonceW: ''
-    };
-
-
-    // Respond with confirmation
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_SESSION_INIT_ACK',
-      sessionId,
-      initialHash,
-      meta
-    } as SecurityResponse);
-
-    // Notify main SDK that session is active (for connection tracking)
-    if (this._onSessionInitCallback) {
-      this._onSessionInitCallback();
-    }
-  }
-
-  /**
-   * Handle checkpoint request - collect all security data for this window.
-   * Returns: inputDigest, canvasHash, rollingHash, sketch
-   * 
-   * NOTE: Canvas sampling is DISABLED by default due to mobile performance.
-   * Set skipCanvas=false in request to enable (expensive on mobile WebGL).
-   */
-  private _handleCheckpointRequest(event: MessageEvent): void {
-    const { seed, nonceW, score, skipCanvas } = event.data as { 
-      seed: string; 
-      nonceW: string;
-      score: number;
-      skipCanvas?: boolean;
-    };
-
-    // 1. Get input events and digest (lightweight)
-    // Note: Tiny race window between getEvents() and flush() - acceptable for use case
-    const rawEvents = this._inputCapture.getEvents();
-    this._sketchBuilder.recordEvents(rawEvents);
-    const { events, digest: inputDigest } = this._inputCapture.flush();
-
-    // 2. Canvas sampling - SKIP by default (getImageData kills mobile WebGL)
-    let canvasHash = '0x0';
-    let sample = '';
-    if (skipCanvas === false) {
-      const result = this._canvasHandler.sample(seed || '0x0');
-      canvasHash = result.canvasHash;
-      sample = result.sample;
-    }
-
-    // 3. Get behavioral sketch for this window, then reset for next
-    const sketch = this._sketchBuilder.build();
-    this._sketchBuilder.reset();
-
-    // 4. Track window index (hash computation skipped for performance)
-    // Backend can compute rolling hash from raw data if needed
-    let rollingHash = '0x0';
-    let windowIndex = 0;
-
-    if (this._rollingState) {
-      windowIndex = this._rollingState.windowIndex;
-      this._rollingState.windowIndex++;
-    }
-
-    const response: CheckpointResponse = {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_CHECKPOINT_RESPONSE',
-      windowIndex,
-      inputDigest,
-      events,
-      canvasHash,
-      sample,
-      rollingHash,
-      sketch
-    };
-
-    this._respond(event, response);
-  }
-
-  /**
-   * Handle checkpoint acknowledgment from server (via GameBox).
-   * Updates the nonce for next rolling hash.
-   */
-  private _handleCheckpointAck(event: MessageEvent): void {
-    const { nonceW, windowIndex } = event.data as { 
-      nonceW: string;
-      windowIndex: number;
-    };
-
-    if (this._rollingState) {
-      this._rollingState.lastNonceW = nonceW;
-    }
-  }
-
-  // ============================================================
-  // Standard Security Data Handlers
-  // ============================================================
-
-  /**
-   * Handle input events request - returns raw events and digest.
-   */
-  private _handleInputEventsRequest(event: MessageEvent): void {
-    const rawEvents = this._inputCapture.getEvents();
-    this._sketchBuilder.recordEvents(rawEvents);
-    const { events: normalizedEvents, digest } = this._inputCapture.flush();
-
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_INPUT_EVENTS_RESPONSE',
-      events: normalizedEvents,
-      digest
-    } as InputEventsResponse);
-  }
-
-  /**
-   * Handle input sketch request - returns 64-byte behavioral fingerprint.
-   */
-  private _handleInputSketchRequest(event: MessageEvent): void {
-    const sketch = this._sketchBuilder.build();
-    
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_INPUT_SKETCH_RESPONSE',
-      sketch
-    } as InputSketchResponse);
-  }
-
-  /**
-   * Handle canvas sample request - samples canvas at seed-derived points.
-   * WARNING: This does getImageData() which is expensive on mobile WebGL!
-   */
-  private _handleCanvasSampleRequest(event: MessageEvent): void {
-    const { seed } = event.data as { seed: string };
-    const { canvasHash, sample } = this._canvasHandler.sample(seed || '0x0');
-
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_CANVAS_SAMPLE_RESPONSE',
-      canvasHash,
-      sample
-    } as CanvasSampleResponse);
-  }
-
-  /**
-   * Handle canvas embed request - embeds watermark in canvas.
-   */
-  private _handleCanvasEmbedRequest(event: MessageEvent): void {
-    const { data } = event.data as { data: string };
-    const { success } = this._canvasHandler.embed(data || '0x0');
-
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_CANVAS_EMBED_RESPONSE',
-      success
-    } as CanvasEmbedResponse);
-  }
-
-  /**
-   * Handle meta request - returns session metadata.
-   */
-  private _handleMetaRequest(event: MessageEvent): void {
-    const meta = this._metadataCollector.collect();
-
-    this._respond(event, {
-      controller: SecurityBridge._CONTROLLER,
-      type: 'SDK_META_RESPONSE',
-      meta
-    } as MetaResponse);
-  }
-
-  // ============================================================
-  // Public Methods (called by main SDK)
-  // ============================================================
-
-  /**
-   * Compute stateHash for score updates.
-   * 
-   * stateHash = keccak256(inputDigest || canvasHash || metaFingerprint || score || timestamp)
-   * 
-   * This ties each score to:
-   * - Input events that led to it (inputDigest)
-   * - Visual game state at that moment (canvasHash)
-   * - Device/environment fingerprint (metaFingerprint)
-   * - The score value and time
-   * 
-   * Called by setProgress() to include cryptographic evidence with each score.
-   */
-  computeStateHash(score: number): string {
-    // Hash computation skipped for performance
-    // Server-side validation (rate limits, deltas, behavioral analysis) provides real security
-    // Client-side hashing was security theater against determined attackers anyway
-    return '0x0';
-  }
-
-  /**
-   * Get current rolling hash state (for debugging).
-   */
-  getRollingState(): RollingHashState | null {
-    return this._rollingState ? { ...this._rollingState } : null;
   }
 }

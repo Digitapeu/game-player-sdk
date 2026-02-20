@@ -4,83 +4,132 @@
 
 1. [Overview](#overview)
 2. [System Architecture](#system-architecture)
-3. [Communication Protocol](#communication-protocol)
-4. [Module Reference](#module-reference)
-5. [Backward Compatibility (v1.0.0 API)](#backward-compatibility-v100-api)
-6. [Cryptographic Design](#cryptographic-design)
-7. [Checkpoint Protocol](#checkpoint-protocol)
-8. [Security Features](#security-features)
-9. [Build System](#build-system)
-10. [Data Structures](#data-structures)
+3. [Build Artifacts](#build-artifacts)
+4. [Communication Protocol](#communication-protocol)
+5. [SDK Shim Modules](#sdk-shim-modules)
+6. [Security Worker Modules](#security-worker-modules)
+7. [Backward Compatibility (v1.0.0 API)](#backward-compatibility-v100-api)
+8. [Checkpoint Protocol](#checkpoint-protocol)
+9. [Security Model](#security-model)
+10. [Build System](#build-system)
+11. [Data Structures](#data-structures)
 
 ---
 
 ## Overview
 
-The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5 games with the WAM gaming platform. It runs inside an iframe containing the game and communicates with the parent GameBox container via the `postMessage` API.
+The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5 games with the WAM gaming platform. It produces **two build artifacts**:
 
-### Key Responsibilities
+1. **SDK Shim** (`main.min.4.js`) - Runs inside the game iframe. Ultra-thin, zero crypto dependencies. Captures raw input events and canvas pixels, forwards them to GameBox via `postMessage`.
 
-1. **Game Integration** - Bridge between HTML5 games and the WAM platform
-2. **Score Reporting** - Send game progress, scores, and level changes to GameBox
-3. **Security Module** - Anti-cheat measures including input capture, canvas fingerprinting, and behavioral analysis
-4. **Data Collection** - Raw events and metadata for server-side validation
-5. **Streaming Support** - WebRTC streaming for tournament spectating
+2. **Security Worker** (`security-worker.min.js`) - Runs in a dedicated Web Worker thread spawned by GameBox. Handles all cryptographic operations: keccak256 hashing, rolling hash chain, input digest, canvas hash, behavioral sketch building.
+
+### Why Two Artifacts
+
+| Problem | Root Cause | Solution |
+|---------|-----------|----------|
+| Security code was bypassable | All crypto ran in same JS context as the game (iframe main thread) | Crypto runs in a Worker thread owned by GameBox - game iframe cannot access it |
+| Android performance killed | keccak256 + canvas sampling blocked the game's rendering thread | All computation runs on a separate OS thread - zero frame impact |
+| Rolling hash disabled (returned `0x0`) | Too expensive for mobile | Worker computes it off-thread, re-enabled |
+| Input digest disabled (returned `0x0`) | Blocking main thread | Worker computes it off-thread, re-enabled |
 
 ### Design Principles
 
-- **Non-intrusive**: SDK must never crash or interfere with game functionality
-- **Passive capture**: All security modules operate in the background
-- **Silent failures**: Errors are caught and logged, never thrown
+- **Non-intrusive**: SDK shim must never crash or interfere with game functionality
+- **Passive capture**: Input capture runs with `{ passive: true }` event listeners
+- **Silent failures**: Errors are caught, never thrown to game code
 - **Strict message filtering**: Only accept messages from `window.parent` (GameBox)
-- **Performance first**: No client-side hashing - backend validates raw data
+- **Zero crypto in iframe**: SDK shim has no `@noble/hashes` dependency at all
+- **Separate thread**: All hashing/signing runs in a Web Worker (off main thread)
 
 ---
 
 ## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              GAMEBOX (Parent)                            │
-│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────────┐   │
-│  │ useGameSession  │    │ Game Lifecycle  │    │ WebSocket Server    │   │
-│  │ (composable)    │    │ Management      │    │ (score relay)       │   │
-│  └────────┬────────┘    └────────┬────────┘    └──────────┬──────────┘   │
-│           │                      │                        │              │
-│           └──────────────────────┼────────────────────────┘              │
-│                                  │                                       │
-│                          postMessage API                                 │
-│                                  │                                       │
-└──────────────────────────────────┼───────────────────────────────────────┘
-                                   │
-                    ╔══════════════╧══════════════╗
-                    ║     SDK (in iframe)         ║
-                    ╠═════════════════════════════╣
-                    ║  ┌───────────────────────┐  ║
-                    ║  │  DigitapGamePlayerSDK │  ║
-                    ║  │  - processQueue()     │  ║
-                    ║  │  - init()             │  ║
-                    ║  │  - setProgress()      │  ║
-                    ║  │  - setLevelUp()       │  ║
-                    ║  │  - setPlayerFailed()  │  ║
-                    ║  └───────────┬───────────┘  ║
-                    ║              │              ║
-                    ║  ┌───────────┴───────────┐  ║
-                    ║  │    SecurityBridge     │  ║
-                    ║  │  ┌─────────────────┐  │  ║
-                    ║  │  │  InputCapture   │  │  ║
-                    ║  │  │  CanvasHandler  │  │  ║
-                    ║  │  │  SketchBuilder  │  │  ║
-                    ║  │  │  MetadataCollect│  │  ║
-                    ║  │  │  RollingHash    │  │  ║
-                    ║  │  └─────────────────┘  │  ║
-                    ║  └───────────────────────┘  ║
-                    ╚═════════════════════════════╝
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │      HTML5 GAME             │
-                    │   (canvas, game logic)      │
-                    └─────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                                  CLIENT                                        │
+│                                                                                │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                          GAME IFRAME                                     │  │
+│  │                                                                          │  │
+│  │   ┌────────────────────────────────────────────────────────────────┐     │  │
+│  │   │                    SDK (Public API UNCHANGED)                   │     │  │
+│  │   │   • init()           • setProgress()                           │     │  │
+│  │   │   • setLevelUp()     • setPlayerFailed()                       │     │  │
+│  │   └────────────────────────────────────────────────────────────────┘     │  │
+│  │                              │                                           │  │
+│  │   ┌──────────────────────────┴─────────────────────────────────────┐     │  │
+│  │   │              SDK Security Shim (NO CRYPTO)                      │     │  │
+│  │   │                                                                 │     │  │
+│  │   │   ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐   │     │  │
+│  │   │   │  InputCapture   │  │  CanvasHandler  │  │ Metadata     │   │     │  │
+│  │   │   │  raw {t,x,y,e} │  │  raw Uint8Array │  │ Collector    │   │     │  │
+│  │   │   │  tuples         │  │  pixels         │  │              │   │     │  │
+│  │   │   └─────────────────┘  └─────────────────┘  └──────────────┘   │     │  │
+│  │   │                              │                                  │     │  │
+│  │   │          postMessage (raw bytes, _digitapSecurity)              │     │  │
+│  │   └──────────────────────────────┼──────────────────────────────────┘     │  │
+│  └──────────────────────────────────┼───────────────────────────────────────┘  │
+│                                     │                                          │
+│                                     ▼                                          │
+│  ┌───────────────────────────────────────────────────────────────────────────┐ │
+│  │                          GAMEBOX (Parent)                                 │ │
+│  │                                                                           │ │
+│  │   ┌─────────────────────────────────────────────────────────────────┐     │ │
+│  │   │                  Security Orchestrator                          │     │ │
+│  │   │   Receives raw data from SDK shim via postMessage               │     │ │
+│  │   │   Forwards to Worker via Worker.postMessage                     │     │ │
+│  │   │   Sends computed results to backend via HTTPS                   │     │ │
+│  │   └──────────────────────────────┬──────────────────────────────────┘     │ │
+│  │                                  │                                        │ │
+│  │   ┌──────────────────────────────┴──────────────────────────────────┐     │ │
+│  │   │              SECURITY WORKER (separate OS thread)               │     │ │
+│  │   │                                                                 │     │ │
+│  │   │   ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐   │     │ │
+│  │   │   │  Rolling Hash   │  │  SketchBuilder  │  │  keccak256   │   │     │ │
+│  │   │   │  Chain Engine   │  │  64-byte        │  │  All crypto  │   │     │ │
+│  │   │   │  H[w] = f(...)  │  │  fingerprint    │  │  operations  │   │     │ │
+│  │   │   └─────────────────┘  └─────────────────┘  └──────────────┘   │     │ │
+│  │   │                                                                 │     │ │
+│  │   │   Computes: inputDigest, canvasHash, rollingHash, sketch        │     │ │
+│  │   │   Game iframe CANNOT access this thread                         │     │ │
+│  │   └─────────────────────────────────────────────────────────────────┘     │ │
+│  │                                                                           │ │
+│  │   ┌─────────────────────────────────────────────────────────────────┐     │ │
+│  │   │                    CRYPTO STORE                                  │     │ │
+│  │   │   • DPoP Key (IndexedDB) - for checkpoint signatures            │     │ │
+│  │   │   • Worker Wallet (IndexedDB, encrypted with Passkey)           │     │ │
+│  │   └──────────────────────────────┬──────────────────────────────────┘     │ │
+│  └──────────────────────────────────┼────────────────────────────────────────┘ │
+└─────────────────────────────────────┼──────────────────────────────────────────┘
+                                      │ HTTPS
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                                 BACKEND                                       │
+│   POST /score/session/start      → Start session, return config               │
+│   POST /score/session/checkpoint → Verify DPoP sig, validate hashes           │
+│   POST /score/session/end        → Verify worker wallet sig, store            │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow: Checkpoint Cycle
+
+```
+1. GameBox receives server nonce (nonceW) from backend
+2. GameBox → SDK shim:  SDK_CHECKPOINT_REQUEST { seed, skipCanvas }
+3. SDK shim collects:
+   • InputCapture.flush()  → RawEventTuple[]  (raw, no hash)
+   • CanvasHandler.sampleRaw(seed) → Uint8Array  (raw pixels, no hash)
+4. SDK shim → GameBox:  SDK_CHECKPOINT_RESPONSE { events, pixels, screenW, screenH }
+5. GameBox → Worker:    PROCESS_CHECKPOINT { events, pixels, nonceW, score, ... }
+6. Worker computes (off main thread):
+   • inputDigest  = keccak256(events)
+   • canvasHash   = keccak256(pixels)
+   • sketch       = SketchBuilder.build()
+   • rollingHash  = keccak256(prevHash | nonceW | inputDigest | canvasHash | score)
+7. Worker → GameBox:    CHECKPOINT_RESULT { inputDigest, canvasHash, rollingHash, sketch }
+8. GameBox signs with DPoP key and sends to backend
 ```
 
 ### Initialization Sequence
@@ -90,32 +139,32 @@ The WAM Game Player SDK is a JavaScript/TypeScript library that integrates HTML5
                     │
 2. SDK script executes immediately
    ├── Attach global message listener
-   ├── Initialize SecurityBridge
-   │   ├── Start InputCapture (event listeners)
+   ├── Initialize SecurityBridge (shim mode)
+   │   ├── Start InputCapture (passive event listeners)
    │   ├── Start CanvasHandler (canvas polling)
    │   └── Send SDK_SECURITY_READY beacon
-   │
    └── Start Connection Handshake (with retry)
        ├── Send SDK_LOADED beacon to parent
        └── Retry every 500ms (max 10 attempts)
                     │
-3. GameBox receives SDK_LOADED / SDK_SECURITY_READY
-   └── Send SDK_SESSION_INIT with sessionId
+3. GameBox receives SDK_LOADED + SDK_SECURITY_READY
+   ├── Spawn Security Worker: new Worker('security-worker.min.js')
+   └── Send SDK_SESSION_INIT to SDK
                     │
 4. SDK receives SDK_SESSION_INIT
-   ├── Compute H₀ = keccak256(sessionId || screenW || screenH || ts)
-   ├── Send SDK_SESSION_INIT_ACK with initialHash, meta
-   ├── Set _isConnected = true
-   └── Clear retry interval
+   ├── Collect session metadata
+   ├── Send SDK_SESSION_INIT_ACK { meta, ts }
+   └── Set _isConnected = true
                     │
-5. Game code calls digitapSDK('init', ...)
+5. GameBox → Worker: INIT_SESSION { sessionId, screenW, screenH, ts }
+   └── Worker computes H₀ = keccak256(sessionId | screenW | screenH | ts)
+                    │
+6. Game code calls digitapSDK('init', ...)
    ├── Send SDK_SETTINGS to parent
    └── GameBox ready to request checkpoints
 ```
 
 ### Connection Retry Mechanism
-
-The SDK implements a retry mechanism to handle race conditions where the SDK loads before GameBox is ready:
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
@@ -123,18 +172,28 @@ The SDK implements a retry mechanism to handle race conditions where the SDK loa
 | `_INIT_RETRY_DELAY_MS` | 500ms | Delay between retries |
 | **Total timeout** | 5 seconds | After which SDK continues without session |
 
-```
-SDK_LOADED beacon sent
-        │
-        ├─► GameBox responds with SDK_SESSION_INIT
-        │       └─► _isConnected = true, stop retrying
-        │
-        └─► No response after 500ms
-                └─► Retry (up to 10 times)
-                        └─► After 10 fails: warn & continue
-```
-
 The SDK remains functional even if GameBox doesn't respond - score reporting and callbacks still work, but security checkpoints won't be available until a session is established.
+
+---
+
+## Build Artifacts
+
+| Artifact | File | Size (prod) | Contains | Crypto | Domain Lock |
+|----------|------|-------------|----------|--------|-------------|
+| SDK Shim | `dist/main.min.4.js` | ~30 KB | Public API, security shim, legacy compat, WebRTC | None | Yes |
+| Security Worker | `dist/security-worker.min.js` | ~7 KB | keccak256, rolling hash, sketch builder | All | No |
+
+### Why the Worker Has No Domain Lock
+
+The SDK shim runs in the game iframe on domains like `game.wam.app`. The Worker runs in the GameBox origin (`wam.app`, `app.wam.app`). Domain locking the Worker to game domains would break it.
+
+### Dependency Split
+
+| Dependency | SDK Shim | Security Worker |
+|------------|:--------:|:---------------:|
+| `@noble/hashes` | - | keccak256 |
+| DOM APIs | window, canvas, touch events | - |
+| Web Worker API | - | self.onmessage |
 
 ---
 
@@ -142,43 +201,20 @@ The SDK remains functional even if GameBox doesn't respond - score reporting and
 
 ### Controllers
 
-The SDK uses **controllers** to namespace message channels:
-
 | Controller | Direction | Purpose |
 |------------|-----------|---------|
-| `_digitapGame` | SDK → GameBox | Game state messages (scores, levels, progress) |
+| `_digitapGame` | SDK → GameBox | Game state (scores, levels, progress) |
 | `_digitapApp` | GameBox → SDK | Game commands (start, pause, continue) |
-| `_digitapSecurity` | Bidirectional | Security module requests/responses + checkpoints |
+| `_digitapSecurity` | Bidirectional | Security shim requests/responses |
 
 ### Message Structure
-
-All messages follow this base structure:
 
 ```typescript
 {
   controller: '_digitapGame' | '_digitapApp' | '_digitapSecurity',
-  type: string,       // Message type identifier
-  ts?: number,        // Optional timestamp
-  ...payload          // Additional fields (flat, not nested)
+  type: string,
+  ...payload
 }
-```
-
-### Message Flow Diagram
-
-```
-GameBox                                        SDK
-   │                                            │
-   │──────── SDK_SESSION_INIT ─────────────────>│ (initialize rolling hash)
-   │<──────── SDK_SESSION_INIT_ACK ─────────────│ (initialHash, meta)
-   │                                            │
-   │──────── SDK_START_GAME ───────────────────>│ (controller: _digitapApp)
-   │                                            │
-   │<──────── SDK_PLAYER_SCORE_UPDATE ─────────>│ (controller: _digitapGame)
-   │                                            │
-   │──────── SDK_CHECKPOINT_REQUEST ───────────>│ (seed, nonceW, score)
-   │<──────── SDK_CHECKPOINT_RESPONSE ──────────│ (inputDigest, canvasHash, rollingHash)
-   │──────── SDK_CHECKPOINT_ACK ───────────────>│ (nonceW for next window)
-   │                                            │
 ```
 
 ### Game Protocol Messages
@@ -187,131 +223,63 @@ GameBox                                        SDK
 
 | Type (v2+) | Legacy Type (v1.0.0) | Description | Payload |
 |------------|----------------------|-------------|---------|
-| `SDK_SETTINGS` | `settings` | SDK initialized | `{ ui: [...], ready: true }` |
-| `SDK_PLAYER_SCORE_UPDATE` | `progress` | Score changed | `{ state, score, level, continueScore, stateHash }` |
-| `SDK_PLAYER_LEVEL_UP` | - | Level increased | `{ level, stateHash }` |
-| `SDK_PLAYER_FAILED` | - | Player died/failed | `{ state, score: 0, stateHash, continueScore }` |
-| `SDK_LOADED` | - | Script loaded (beacon) | `{ ts }` |
-
-> **Note:** When using the legacy `_digitapUser` API, both NEW and OLD message types are sent for maximum compatibility.
+| `SDK_SETTINGS` | `settings` | SDK initialized | `{ ui, ready }` |
+| `SDK_PLAYER_SCORE_UPDATE` | `progress` | Score changed | `{ state, score, level, continueScore }` |
+| `SDK_PLAYER_LEVEL_UP` | - | Level increased | `{ level }` |
+| `SDK_PLAYER_FAILED` | - | Player died | `{ state, score: 0, continueScore }` |
+| `SDK_LOADED` | - | Script loaded beacon | `{ ts }` |
 
 #### GameBox → SDK (`_digitapApp`)
 
-| Type (v2+) | Legacy Type (v1.0.0) | Description | Payload |
-|------------|----------------------|-------------|---------|
-| `SDK_START_GAME` | `startGame` | Start game | - |
-| `SDK_PAUSE_GAME` | - | Pause game | - |
-| `SDK_START_GAME_FROM_ZERO` | `startGameFromZero` | Restart from zero | - |
-| `SDK_CONTINUE_WITH_CURRENT_SCORE` | `continueWithCurrentScore` | Continue after death (revive) | - |
+| Type (v2+) | Legacy Type (v1.0.0) | Description |
+|------------|----------------------|-------------|
+| `SDK_START_GAME` | `startGame` | Start game |
+| `SDK_PAUSE_GAME` | - | Pause game |
+| `SDK_START_GAME_FROM_ZERO` | `startGameFromZero` | Restart from zero |
+| `SDK_CONTINUE_WITH_CURRENT_SCORE` | `continueWithCurrentScore` | Continue after death (revive) |
 
-> **Backward Compatibility:** The SDK accepts both NEW (`SDK_*`) and OLD (camelCase) message types for compatibility with older GameBox versions.
+### Security Protocol Messages (SDK Shim ↔ GameBox)
 
-### Player Death & Revive Flow
+| Type | Direction | Payload |
+|------|-----------|---------|
+| `SDK_SECURITY_READY` | SDK → GB | `{ ts }` |
+| `SDK_SESSION_INIT` | GB → SDK | `{ sessionId }` |
+| `SDK_SESSION_INIT_ACK` | SDK → GB | `{ meta, ts }` |
+| `SDK_CHECKPOINT_REQUEST` | GB → SDK | `{ seed, skipCanvas }` |
+| `SDK_CHECKPOINT_RESPONSE` | SDK → GB | `{ events, pixels, eventCount, screenW, screenH }` |
+| `SDK_CHECKPOINT_ACK` | GB → SDK | - |
+| `SDK_CANVAS_EMBED_REQUEST` | GB → SDK | `{ data: Uint8Array }` |
+| `SDK_CANVAS_EMBED_RESPONSE` | SDK → GB | `{ success }` |
+| `SDK_META_REQUEST` | GB → SDK | - |
+| `SDK_META_RESPONSE` | SDK → GB | `{ meta }` |
 
-When a player dies, the SDK does **NOT** auto-reset. It waits for GameBox to decide:
+### Worker Protocol Messages (GameBox Main Thread ↔ Worker)
 
-```
-Game calls: setPlayerFailed('FAIL')
-        │
-        ├── SDK captures score before setting to 0
-        ├── Sets: continueScore = scoreAtDeath, score = 0
-        ├── Sets: _deathTimestamp = Date.now()  ← Grace period starts
-        ├── Sends SDK_PLAYER_FAILED to GameBox
-        │
-        └── GameBox sends SDK_PAUSE_GAME
-                    │
-        ┌───────────┴───────────┐
-        │                       │
-        ▼                       │
-   Within 500ms?                │
-        │                       │
-   YES: Delay pause             NO: Pause immediately
-        │                       │
-        └───────────┬───────────┘
-                    │
-        Death animation completes, game paused
-                    │
-        ┌───────────┴───────────┐
-        │                       │
-SDK_START_GAME_FROM_ZERO    SDK_CONTINUE_WITH_CURRENT_SCORE
-        │                       │
-        ├── Cancel pending pause├── Cancel pending pause
-        ├── score = 0           ├── score = continueScore (restore)
-        ├── level = 0           ├── level preserved
-        ├── afterStartGame      └── afterContinueWithCurrentScore()
-        │   FromZero()              (game resumes itself in callback)
-        └── afterStartGame()
-```
-
-#### Death Animation Grace Period
-
-GameBox sends `SDK_PAUSE_GAME` immediately after receiving `SDK_PLAYER_FAILED`, which would freeze the game mid-death-animation. The SDK implements a **500ms grace period**:
-
-| Parameter | Value | Purpose |
-|-----------|-------|---------|
-| `_deathGracePeriodMs` | 500ms | Time for death animation to play |
-| `_deathTimestamp` | Set on death | Tracks when death occurred |
-| `_pendingPauseTimeout` | setTimeout ID | Allows cancellation on restart/revive |
-
-**Critical:** When restart or revive is received, any pending pause is **cancelled** to prevent race conditions where the delayed pause fires after the game has already restarted.
-
-**Important:** The SDK only calls `afterContinueWithCurrentScore()` on revive - NOT `afterStartGame()`. Games must handle resuming/unpausing inside their `_afterContinueWithCurrentScore` callback. This maintains backward compatibility with legacy games.
-
-### Security Protocol Messages
-
-#### Session & Checkpoint Protocol
-
-| Type | Direction | Description | Payload |
-|------|-----------|-------------|---------|
-| `SDK_SECURITY_READY` | SDK → GB | Security module ready | `{ ts }` |
-| `SDK_SESSION_INIT` | GB → SDK | Initialize session | `{ sessionId }` |
-| `SDK_SESSION_INIT_ACK` | SDK → GB | Confirm with initial hash | `{ sessionId, initialHash, meta }` |
-| `SDK_CHECKPOINT_REQUEST` | GB → SDK | Request security data | `{ seed, nonceW, score }` |
-| `SDK_CHECKPOINT_RESPONSE` | SDK → GB | Return all security data | `{ windowIndex, inputDigest, events, canvasHash, sample, rollingHash, sketch }` |
-| `SDK_CHECKPOINT_ACK` | GB → SDK | Acknowledge checkpoint | `{ windowIndex, nonceW }` |
-
-#### Basic Security Messages
-
-| Type | Direction | Description | Payload |
-|------|-----------|-------------|---------|
-| `SDK_INPUT_EVENTS_REQUEST` | GB → SDK | Request input events | - |
-| `SDK_INPUT_EVENTS_RESPONSE` | SDK → GB | Input events + digest | `{ events, digest }` |
-| `SDK_INPUT_SKETCH_REQUEST` | GB → SDK | Request behavioral fingerprint | - |
-| `SDK_INPUT_SKETCH_RESPONSE` | SDK → GB | 64-byte sketch | `{ sketch }` |
-| `SDK_CANVAS_SAMPLE_REQUEST` | GB → SDK | Request canvas sample | `{ seed }` |
-| `SDK_CANVAS_SAMPLE_RESPONSE` | SDK → GB | Canvas hash + sample | `{ canvasHash, sample }` |
-| `SDK_CANVAS_EMBED_REQUEST` | GB → SDK | Embed watermark | `{ data }` |
-| `SDK_CANVAS_EMBED_RESPONSE` | SDK → GB | Embed result | `{ success }` |
-| `SDK_META_REQUEST` | GB → SDK | Request metadata | - |
-| `SDK_META_RESPONSE` | SDK → GB | Session metadata | `{ meta }` |
+| Type | Direction | Payload |
+|------|-----------|---------|
+| `INIT_SESSION` | GB → Worker | `{ sessionId, screenW, screenH, ts }` |
+| `SESSION_READY` | Worker → GB | `{ initialHash }` |
+| `PROCESS_CHECKPOINT` | GB → Worker | `{ windowIndex, nonceW, score, events, pixels, screenW, screenH }` |
+| `CHECKPOINT_RESULT` | Worker → GB | `{ windowIndex, inputDigest, canvasHash, rollingHash, sketch, eventCount }` |
+| `COMPUTE_FINAL_HASH` | GB → Worker | `{ sessionId, finalScore }` |
+| `FINAL_HASH_RESULT` | Worker → GB | `{ finalHash, rollingHash, totalWindows }` |
+| `RESET` | GB → Worker | - |
+| `ERROR` | Worker → GB | `{ message, context }` |
 
 ### Message Filtering
 
-The SDK implements **strict message filtering** to prevent processing messages from browser extensions (e.g., MetaMask), other iframes, or malicious scripts:
+The SDK shim implements strict message filtering:
 
 ```typescript
-// Filter 1: Source must be parent window (GameBox)
-if (event.source !== window.parent) return;
-
-// Filter 2: Must have valid structure
-if (!data || typeof data !== 'object') return;
-
-// Filter 3: Must have known controller
-if (controller !== '_digitapApp' && controller !== '_digitapSecurity') return;
-
-// Filter 4: Must have valid message type (whitelist)
-if (!validTypes.includes(data.type)) return;
-
-// Filter 5: Origin validation
-if (!allowedOrigins.includes(event.origin)) return;
+if (event.source !== window.parent) return;               // Must be GameBox
+if (!data || typeof data !== 'object') return;             // Must be valid object
+if (data.controller !== '_digitapSecurity') return;        // Must be our protocol
+if (!VALID_TYPES.includes(data.type)) return;              // Must be known type
 ```
 
 #### Allowed Origins
 
-The SDK accepts messages from these whitelisted origins:
-
 ```typescript
-// Production
 'https://wam.app'
 'https://app.wam.app'
 'https://wam.eu'
@@ -319,614 +287,474 @@ The SDK accepts messages from these whitelisted origins:
 'https://play.wam.app'
 ```
 
----
+### Player Death & Revive Flow
 
-## Module Reference
-
-### DigitapGamePlayerSDK
-
-**Location:** `src/index.ts`
-
-The main SDK class that provides the public API for game developers.
-
-#### Public API (Frozen)
-
-```typescript
-// Initialize SDK
-digitapSDK('init', hasScore?: boolean, hasHighScore?: boolean)
-
-// Register callbacks for game commands
-digitapSDK('setCallback', fn: CallbackName, callback: Function)
-
-// Report score/progress
-digitapSDK('setProgress', state: string, score: number, level: number)
-
-// Report level up
-digitapSDK('setLevelUp', level: number)
-
-// Report player failure/death
-digitapSDK('setPlayerFailed', state?: string)
+```
+Game calls: setPlayerFailed('FAIL')
+        │
+        ├── Captures continueScore = score before zeroing
+        ├── Sets: _deathTimestamp = Date.now()  ← Grace period starts
+        ├── Sends SDK_PLAYER_FAILED to GameBox
+        │
+        └── GameBox sends SDK_PAUSE_GAME
+                    │
+            Within 500ms of death?
+            YES: Delay pause (death animation grace period)
+            NO:  Pause immediately
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+SDK_START_GAME_FROM_ZERO    SDK_CONTINUE_WITH_CURRENT_SCORE
+        │                       │
+        ├── score = 0           ├── score = continueScore
+        ├── level = 0           ├── level preserved
+        ├── afterStartGame      └── afterContinueWithCurrentScore()
+        │   FromZero()
+        └── afterStartGame()
 ```
 
 ---
 
-### SecurityBridge
+## SDK Shim Modules
+
+### SecurityBridge (Shim)
 
 **Location:** `src/security/SecurityBridge.ts`
 
-The coordinator module that handles all security-related communication with GameBox.
+Thin coordinator between game iframe and GameBox parent. No crypto, no rolling state.
 
-#### Responsibilities
+| Responsibility | How |
+|----------------|-----|
+| Listen for GameBox requests | `window.addEventListener('message', ...)` |
+| Collect raw input events | `InputCapture.flush()` → `RawEventTuple[]` |
+| Collect raw canvas pixels | `CanvasHandler.sampleRaw(seed)` → `Uint8Array` |
+| Collect session metadata | `MetadataCollector.collect()` → `SessionMeta` |
+| Write watermark bytes | `CanvasHandler.embedWatermark(data)` → `boolean` |
+| Forward all raw data to GameBox | `event.source.postMessage(response, origin)` |
 
-- Listen for security requests from parent
-- Dispatch requests to appropriate modules
-- Format and send responses
-- Origin validation
-- **Rolling hash state management**
-
----
-
-### StateHash (DISABLED for Performance)
-
-> **Note:** Client-side stateHash computation is **DISABLED** as of v3.4.0 for mobile performance. The SDK returns `'0x0'` for all stateHash values. Server-side validation (rate limits, score deltas, behavioral analysis) provides the actual security.
-
-#### Why Client-Side Hashing Was Removed
-
-| Issue | Impact |
-|-------|--------|
-| keccak256 computation | 2-5ms per hash blocks main thread |
-| Canvas sampling | `getImageData()` causes GPU→CPU sync stalls |
-| Mobile WebGL | Severe frame drops on Construct 3 / Phaser games |
-| Security theater | Determined attackers can fake all client-side crypto |
-
-#### What Actually Provides Security
-
-| Layer | Location | Protection |
-|-------|----------|------------|
-| Rate limiting | Server (Lua) | Max ticks/second, min intervals |
-| Score delta validation | Server (Lua) | Max score increase per tick |
-| Monotonic enforcement | Server (Lua) | Score can't decrease |
-| Sequence validation | Server (Lua) | No gaps, no replays |
-| Behavioral fingerprint | SDK → Server | 64-byte sketch detects bots |
-| Session binding | Server | Auth session must match |
-
-#### Current Flow
-
-```
-1. Game calls: digitapSDK('setProgress', state, score, level)
-2. SDK sends: SDK_PLAYER_SCORE_UPDATE { score, stateHash: '0x0', ... }
-3. Server validates via Lua script (rate limits, deltas, sequences)
-4. Behavioral sketch analyzed for bot patterns
-```
-
----
+**What it does NOT do:**
+- No keccak256 hashing
+- No rolling hash chain state
+- No sketch building
+- No input digest computation
+- No imports from `@noble/hashes`
 
 ### InputCapture
 
 **Location:** `src/security/InputCapture.ts`
 
-Passively captures all user input events (touch, mouse) without interfering with game functionality.
+Passively captures user input events and returns compact raw tuples.
 
-#### Features
-
-| Feature | Value | Purpose |
-|---------|-------|---------|
-| `_MAX_BUFFER_SIZE` | 5,000 events | Prevent unbounded memory growth |
-| Event cleanup | `removeEventListener` on `stop()` | Prevent memory leaks |
-| No move events | `touchmove`/`mousemove` disabled | Reduce event volume on mobile |
-
-#### Output
-
-Events are returned raw - **no client-side hashing** for performance:
+| Feature | Value |
+|---------|-------|
+| Events captured | `touchstart`, `touchend`, `mousedown`, `mouseup` |
+| Events NOT captured | `touchmove`, `mousemove` (too frequent on mobile) |
+| Buffer limit | 5,000 events |
+| Listener mode | `{ passive: true }` |
+| Output format | `RawEventTuple[]` - `{ t, x, y, e }` |
+| Hashing | None (Worker does it) |
 
 ```typescript
-flush(): { events: InputEvent[]; digest: string } {
-  const events = this._normalize(this._buffer);
-  this._buffer = [];
-  return { events, digest: '0x0' }; // Backend computes hash if needed
+interface RawEventTuple {
+  t: number;  // performance.now() timestamp
+  x: number;  // clientX (raw pixels)
+  y: number;  // clientY (raw pixels)
+  e: number;  // 1 = tap, 0 = release
 }
 ```
-
----
 
 ### CanvasHandler
 
 **Location:** `src/security/CanvasHandler.ts`
 
-Handles canvas operations for game state verification and watermarking.
-
-#### 2D vs WebGL Canvas Support
-
-The SDK automatically detects canvas type and uses the appropriate sampling method:
+Reads raw pixel data from the game canvas. Returns raw bytes for the Worker to hash.
 
 | Canvas Type | Detection | Sampling Method |
 |-------------|-----------|-----------------|
 | 2D Canvas | `getContext('2d')` returns context | Direct `getImageData()` |
 | WebGL Canvas | `getContext('webgl'/'webgl2')` | Snapshot to offscreen 2D canvas |
 
+**Key methods:**
+
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `sampleRaw(seed)` | `Uint8Array \| null` | Raw RGBA bytes at deterministic points |
+| `embedWatermark(data)` | `boolean` | Write LSB steganography (2D canvas only) |
+
+Deterministic point selection uses a fast integer PRNG seeded by the server nonce - no keccak256 needed in the shim.
+
+### MetadataCollector
+
+**Location:** `src/security/MetadataCollector.ts`
+
+Collects session metadata for trajectory replay normalization. 44 lines, no crypto.
+
 ```typescript
-// For WebGL canvases (e.g., Construct 3, Phaser with WebGL):
-if (this._isWebGL && this._samplerCanvas && this._samplerCtx) {
-  // Draw WebGL canvas to 2D canvas, then sample
-  this._samplerCtx.drawImage(this._canvas, 0, 0);
-  return this._samplerCtx;
-}
-```
-
-> **Note:** Canvas watermarking (embed/extract) only works on 2D canvases. WebGL canvases don't support embedding.
-
-#### Canvas Sampling
-
-Uses **keccak256** for deterministic point selection and hash generation:
-
-```typescript
-sample(seed: string): CanvasSampleResult {
-  const canvasHash = keccak256Bytes(samples);
-  // ...
+interface SessionMeta {
+  screenW: number;
+  screenH: number;
+  dpr: number;
+  orientation: 'portrait' | 'landscape';
+  platform: 'ios' | 'android' | 'web' | 'desktop';
+  touchCapable: boolean;
 }
 ```
 
 ---
 
+## Security Worker Modules
+
+All modules below run inside the Web Worker thread. Game iframe JavaScript cannot access them.
+
+### Worker Entry
+
+**Location:** `src/worker/index.ts`
+
+Handles `self.onmessage` and dispatches to crypto/sketch modules. Maintains rolling hash state:
+
+```typescript
+let sessionId: string;
+let rollingHash: string;
+let windowIndex: number;
+const sketch = new SketchBuilder();
+```
+
+### Crypto Module
+
+**Location:** `src/worker/crypto.ts`
+
+All cryptographic operations:
+
+| Function | Input | Output |
+|----------|-------|--------|
+| `keccak256(message)` | string | `0x`-prefixed hex hash |
+| `keccak256Bytes(data)` | Uint8Array | `0x`-prefixed hex hash |
+| `computeInitialHash(sessionId, screenW, screenH, ts)` | session params | H₀ hash |
+| `computeRollingHash(prevHash, nonceW, inputDigest, canvasHash, score)` | window data | H[w] hash |
+| `computeFinalHash(sessionId, rollingHash, finalScore)` | session end | final hash |
+| `computeInputDigest(events)` | RawEventTuple[] | keccak256 of encoded events |
+| `computeCanvasHash(pixels)` | Uint8Array | keccak256 of pixel data |
+
+### Rolling Hash Chain
+
+```
+H₀ = keccak256(sessionId | screenW | screenH | ts)
+H[w] = keccak256(H[w-1] | nonceW | inputDigest | canvasHash | score)
+finalHash = keccak256(sessionId | rollingHash | finalScore)
+```
+
+Each window's hash depends on the previous one and a server-issued nonce, preventing:
+- Window omission (skipping checkpoints breaks the chain)
+- Replay attacks (each nonce is unique)
+- Score manipulation (score is bound into the hash)
+- Time compression (server gates nonce issuance)
+
 ### SketchBuilder
 
-**Location:** `src/security/SketchBuilder.ts`
+**Location:** `src/worker/SketchBuilder.ts`
 
-Builds a 64-byte behavioral fingerprint for bot detection from user input patterns.
+Builds a 64-byte behavioral fingerprint for bot detection. Ingests raw event tuples.
 
-#### Sketch Layout (64 bytes)
+#### Layout (64 bytes)
 
 | Bytes | Content | Purpose |
 |-------|---------|---------|
 | 0-7 | Tap interval histogram | Detect robotic timing |
-| 8-15 | Touch zone distribution | Detect unrealistic patterns |
-| 16-23 | Velocity histogram | Detect inhuman movement |
+| 8-15 | Touch zone distribution (4x2 grid) | Detect unrealistic patterns |
+| 16-23 | Velocity histogram (between taps) | Detect inhuman movement speed |
 | 24-47 | Reserved | Future use |
 | 48-55 | Entropy measures | Statistical randomness |
-| 56-63 | Metadata (event counts) | Volume metrics |
+| 56-63 | Metadata (counts) | Volume metrics |
 
-#### Per-Checkpoint Reset
+Reset after each checkpoint window to ensure per-window behavioral analysis.
 
-**Critical:** The SketchBuilder is **reset after each checkpoint** to ensure each window's sketch represents only that window's behavior:
+### Worker Message Types
 
-```typescript
-// In _handleCheckpointRequest():
-const sketch = this._sketchBuilder.build();
-this._sketchBuilder.reset(); // Reset for next window
-```
+**Location:** `src/worker/types.ts`
 
-Without this reset, sketches would accumulate events from all previous windows, making them useless for detecting anomalies in specific time periods.
-
-#### Velocity Sanity Checks
-
-Velocity calculations include sanity checks to prevent Infinity/NaN:
-
-```typescript
-// Only record if dt > 1ms (avoid division by near-zero)
-if (dt > 1) {
-  const velocity = Math.sqrt(dx * dx + dy * dy) / dt;
-  // Cap at reasonable max (10000 px/ms is absurd)
-  if (isFinite(velocity) && velocity < 10000) {
-    this._velocities.push(velocity);
-  }
-}
-```
+Defines the contract between GameBox main thread and Worker thread.
 
 ---
 
 ## Backward Compatibility (v1.0.0 API)
 
-The SDK provides full backward compatibility with games written for the original `digitap-sdk-1.0.0.js`. Games using the legacy API work unchanged while automatically gaining all v2+ security features.
+Games written for the original `digitap-sdk-1.0.0.js` work unchanged. The SDK exposes a global `_digitapUser` object that forwards to the modern SDK internally.
 
-### Legacy Global: `_digitapUser`
+### Legacy API vs Modern API
 
-Games written for SDK v1.0.0 use a global `_digitapUser` object with a different API pattern. The SDK exposes this object automatically.
+| Legacy API (v1.0.0) | Modern API (v2+) |
+|---------------------|------------------|
+| `_digitapUser.init(uiOptions)` | `digitapSDK('init', hasScore, hasHighScore)` |
+| `_digitapUser._afterStartGame = fn` | `digitapSDK('setCallback', 'afterStartGame', fn)` |
+| `_digitapUser.progress.score = 100; _digitapUser.sendData()` | `digitapSDK('setProgress', 'PLAYING', 100, 1)` |
 
-#### Legacy API vs Modern API
-
-| Legacy API (v1.0.0) | Modern API (v2+) | Notes |
-|---------------------|------------------|-------|
-| `_digitapUser.init(uiOptions)` | `digitapSDK('init', hasScore, hasHighScore)` | Both work |
-| `_digitapUser._afterStartGame = fn` | `digitapSDK('setCallback', 'afterStartGame', fn)` | Override vs register |
-| `_digitapUser.progress.score = 100` | N/A | Direct property access |
-| `_digitapUser.sendData()` | `digitapSDK('setProgress', state, score, level)` | sendData forwards internally |
-| `_digitapUser.extra.multiplier` | N/A | Available for legacy games |
-
-#### Legacy `_digitapUser` Object Structure
+### Legacy `_digitapUser` Object
 
 ```typescript
 _digitapUser = {
-  gameObject: any,              // Game reference (optional)
-  isLoaded: boolean,            // SDK initialization state
-  origin: string | null,        // Validated origin
-  allowedOrigins: string[],     // Whitelisted domains
-  progress: {
-    controller: '_digitapGame',
-    type: 'progress',
-    score: number,
-    state: string | null,
-    continueScore: number,
-    level?: number,
-  },
-  extra: {
-    multiplier: number,         // Default: 1
-  },
-  
-  // Methods
-  sendData(gameObject?: any): void,
-  init(uiOptions?: string[]): void,
-  
-  // Hookable callbacks (games OVERRIDE these)
+  gameObject: any,
+  isLoaded: boolean,
+  origin: string | null,
+  allowedOrigins: string[],
+  progress: { controller, type, score, state, continueScore, level },
+  extra: { multiplier: 1 },
+  sendData(gameObject?): void,
+  init(uiOptions?): void,
   _afterStartGameFromZero(): void,
   _afterContinueWithCurrentScore(): void,
   _afterStartGame(): void,
 }
 ```
 
-### How Legacy Games Work
-
-#### 1. Initialization
-
-```javascript
-// Legacy game code (unchanged)
-_digitapUser.init(['sound', 'background']);
-```
-
-Internally, this:
-1. Sends `type: 'settings'` message (OLD protocol)
-2. Sends `type: 'SDK_SETTINGS'` message (NEW protocol)
-3. Initializes the modern SDK event listeners
-
-#### 2. Callback Registration
-
-```javascript
-// Legacy game code (unchanged)
-_digitapUser._afterStartGame = function() {
-    startMyGame();
-};
-
-_digitapUser._afterStartGameFromZero = function() {
-    resetMyGame();
-    _digitapUser.progress.score = 0;
-};
-
-_digitapUser._afterContinueWithCurrentScore = function() {
-    continueMyGame(_digitapUser.progress.continueScore);
-};
-```
-
-When GameBox sends `SDK_START_GAME` (or legacy `startGame`):
-1. Modern SDK receives the message
-2. Calls `DigitapGamePlayerSDK.afterStartGame()`
-3. Which forwards to `_digitapUser._afterStartGame()`
-
-#### 3. Score Reporting
-
-```javascript
-// Legacy game code (unchanged)
-_digitapUser.progress.score = 100;
-_digitapUser.progress.state = 'PLAYING';
-_digitapUser.sendData();
-```
-
-When `sendData()` is called:
-1. Reads `progress.score`, `progress.state`, `progress.level`
-2. Calls modern `setProgress()` internally
-3. **Computes stateHash** with all security features
-4. Sends message to GameBox with cryptographic evidence
-
-### Message Protocol Compatibility
-
-The SDK handles both OLD and NEW message types:
-
-```
-GameBox → SDK (both accepted):
-├── SDK_START_GAME          ─┬─→ afterStartGame()
-└── startGame               ─┘
-
-├── SDK_START_GAME_FROM_ZERO ─┬─→ afterStartGameFromZero()
-└── startGameFromZero        ─┘
-
-├── SDK_CONTINUE_WITH_CURRENT_SCORE ─┬─→ afterContinueWithCurrentScore()
-└── continueWithCurrentScore         ─┘
-```
-
-```
-SDK → GameBox (legacy API sends both):
-├── type: 'settings'      (OLD)
-└── type: 'SDK_SETTINGS'  (NEW)
-```
-
-### Security Benefits for Legacy Games
-
-Even when using the legacy `_digitapUser` API, games automatically receive:
-
-| Feature | Description |
-|---------|-------------|
-| **Input Capture** | All touch/mouse events recorded for server analysis |
-| **Behavioral Fingerprint** | 64-byte sketch for anti-bot detection |
-| **Server Validation** | Rate limits, score deltas, sequence checks |
-
-> **Note:** Client-side hashing (stateHash, rolling hash) is disabled for performance. Security comes from server-side validation.
-
-### Migration Path
-
-Games can migrate incrementally:
-
-```javascript
-// Phase 1: Legacy API (works today)
-_digitapUser.init(['sound']);
-_digitapUser._afterStartGame = () => startGame();
-_digitapUser.progress.score = 100;
-_digitapUser.sendData();
-
-// Phase 2: Modern API (recommended for new games)
-digitapSDK('init', true, true);
-digitapSDK('setCallback', 'afterStartGame', () => startGame());
-digitapSDK('setProgress', 'PLAYING', 100, 1);
-```
-
-Both APIs can coexist - the SDK handles routing internally.
-
----
-
-## Cryptographic Design
-
-### Client-Side Hashing: DISABLED
-
-> **As of v3.4.0:** All client-side keccak256 hashing is **disabled** for performance. The SDK sends raw data and the backend computes hashes if needed.
-
-| What | Before (v3.3) | Now (v3.4+) |
-|------|---------------|-------------|
-| `inputDigest` | keccak256(events) | `'0x0'` |
-| `canvasHash` | keccak256(samples) | `'0x0'` (sampling also disabled) |
-| `rollingHash` | keccak256(chain) | `'0x0'` |
-| `stateHash` | keccak256(all) | `'0x0'` |
-
-### Why This Is OK
-
-Client-side cryptography is **security theater** against determined attackers:
-- Attackers who can modify JS can fake all hashes
-- Real security comes from server-side validation
-- Mobile performance is more important than fake security
-
-### What Remains
-
-The SDK still uses keccak256 for:
-- **Initial session hash** (once per session, not during gameplay)
-- **Deterministic random** for canvas sampling points (when enabled)
-
-### Hash Functions (Available but Rarely Used)
-
-**Location:** `src/security/utils.ts`
-
-```typescript
-// String → 0x-prefixed hash
-function keccak256(message: string): string
-
-// Bytes → 0x-prefixed hash
-function keccak256Bytes(data: Uint8Array): string
-```
-
-### Canonical JSON
-
-Still available for backend use if needed:
-
-```typescript
-function canonicalJSON(obj: unknown): string {
-  return JSON.stringify(obj, (_, value) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const sorted: Record<string, unknown> = {};
-      for (const key of Object.keys(value).sort()) {
-        sorted[key] = value[key];
-      }
-      return sorted;
-    }
-    return value;
-  });
-}
-```
+Both APIs can coexist. The SDK handles routing internally.
 
 ---
 
 ## Checkpoint Protocol
 
-The checkpoint protocol collects security evidence for server-side validation.
+### What Gets Collected (SDK Shim → GameBox)
 
-> **Note:** As of v3.4.0, client-side hash computation is **disabled** for performance. The SDK sends raw data and the backend can compute hashes if needed.
+| Data | Format | Size | Source |
+|------|--------|------|--------|
+| `events` | `RawEventTuple[]` | ~16 bytes/event | InputCapture |
+| `pixels` | `Uint8Array` | 128 bytes (8 points x 16 bytes) | CanvasHandler |
+| `screenW`, `screenH` | numbers | 8 bytes | window.innerWidth/Height |
 
-### What Gets Collected
+### What Gets Computed (Security Worker)
 
-| Data | Source | Purpose |
-|------|--------|---------|
-| `events` | InputCapture | Raw input events for replay/analysis |
-| `sketch` | SketchBuilder | 64-byte behavioral fingerprint |
-| `windowIndex` | Counter | Track checkpoint sequence |
-| `inputDigest` | `'0x0'` | Placeholder (backend computes if needed) |
-| `canvasHash` | `'0x0'` | Placeholder (sampling disabled by default) |
-| `rollingHash` | `'0x0'` | Placeholder (backend computes if needed) |
+| Data | Hash | Source |
+|------|------|--------|
+| `inputDigest` | keccak256(events encoded as float32 array) | crypto.ts |
+| `canvasHash` | keccak256(raw pixel bytes) | crypto.ts |
+| `rollingHash` | keccak256(prevHash \| nonceW \| inputDigest \| canvasHash \| score) | crypto.ts |
+| `sketch` | 64-byte hex fingerprint | SketchBuilder |
 
-### Checkpoint Flow (Simplified)
+### Full Checkpoint Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 1. GameBox → SDK: SDK_SESSION_INIT { sessionId }                        │
-│                                                                         │
-│ 2. SDK computes initial hash (once per session, OK for performance):    │
-│    H₀ = keccak256(sessionId || screenW || screenH || ts)                │
-│                                                                         │
-│ 3. SDK → GameBox: SDK_SESSION_INIT_ACK { initialHash, meta }            │
-└─────────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ DURING GAMEPLAY (every N seconds)                                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│ 4. GameBox → SDK: SDK_CHECKPOINT_REQUEST { seed, nonceW, score }        │
-│                                                                         │
-│ 5. SDK collects (FAST - no hashing):                                    │
-│    • Flush input events → events[]                                      │
-│    • Build behavioral sketch → sketch                                   │
-│    • Reset sketch for next window                                       │
-│    • Increment windowIndex                                              │
-│                                                                         │
-│ 6. SDK → GameBox: SDK_CHECKPOINT_RESPONSE {                             │
-│      windowIndex,                                                       │
-│      inputDigest: '0x0',  // Backend computes                           │
-│      events,              // Raw data                                   │
-│      canvasHash: '0x0',   // Sampling disabled                          │
-│      sample: '',          // Empty                                      │
-│      rollingHash: '0x0',  // Backend computes                           │
-│      sketch               // Behavioral fingerprint                     │
-│    }                                                                    │
-│                                                                         │
-│ 7. Backend validates events, sketch, computes hashes if needed          │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Backend Can Reconstruct Hashes
-
-If the backend needs to verify hash chains, it has all the raw data:
-
-```typescript
-// Backend (Node.js/TypeScript)
-import { keccak256 } from 'ethers';
-
-const inputDigest = keccak256(JSON.stringify(events));
-const rollingHash = keccak256(
-  `${prevHash}|${nonceW}|${inputDigest}|${canvasHash}|${score}`
-);
+GameBox                    SDK Shim                   Security Worker
+   │                          │                             │
+   │── CHECKPOINT_REQUEST ──>│                             │
+   │   { seed, skipCanvas }   │                             │
+   │                          │ flush events + sample       │
+   │<── CHECKPOINT_RESPONSE ──│ canvas                      │
+   │   { events, pixels,      │                             │
+   │     screenW, screenH }   │                             │
+   │                          │                             │
+   │── PROCESS_CHECKPOINT ──────────────────────────────-->│
+   │   { events, pixels, nonceW, score, windowIndex }      │
+   │                          │                             │
+   │                          │              keccak256(...)  │
+   │                          │              build sketch    │
+   │                          │              update chain    │
+   │                          │                             │
+   │<── CHECKPOINT_RESULT ─────────────────────────────────│
+   │   { inputDigest, canvasHash, rollingHash, sketch }    │
+   │                          │                             │
+   │── DPoP sign + POST /checkpoint → Backend              │
 ```
 
 ---
 
-## Security Features
+## Security Model
+
+### Layered Defense
+
+| Layer | Location | What It Does |
+|-------|----------|-------------|
+| **Input capture** | SDK Shim (iframe) | Records all touch/mouse events passively |
+| **Canvas sampling** | SDK Shim (iframe) | Reads raw pixels at server-seeded points |
+| **Rolling hash chain** | Security Worker | Cryptographic chain linking all windows |
+| **Behavioral fingerprint** | Security Worker | 64-byte sketch detects bot patterns |
+| **Server-paced nonces** | Backend | Time oracle prevents burst generation |
+| **DPoP signatures** | GameBox | Device-bound checkpoint authentication |
+| **Worker wallet signature** | GameBox | Final score claim signed by device key |
+| **Rate limiting** | Backend | Max ticks/second, score deltas |
+
+### Why the Worker Architecture Is Secure
+
+| Attack | Main-Thread SDK (old) | Worker Architecture (new) |
+|--------|:--------------------:|:-------------------------:|
+| Override security functions in console | Trivial | Impossible (Worker is separate context) |
+| Intercept postMessage between shim ↔ GameBox | Possible but raw data only | Raw data only - hashes computed in Worker |
+| Fake checkpoint responses | Send any hash values | Can't compute valid rolling hash chain without Worker state |
+| Forge signatures | If keys accessible | Keys in GameBox IndexedDB, never enter iframe |
 
 ### Anti-Tampering
 
-1. **Domain Locking**: SDK only runs on allowed domains (enforced by obfuscator)
+1. **Domain Locking**: SDK shim locked to `*.wam.app` / `*.digitap.eu` (obfuscator enforced)
 2. **Origin Validation**: Messages only accepted from whitelisted origins
 3. **Source Validation**: Messages only accepted from `window.parent`
-4. **Console Disabling**: `disableConsoleOutput: true` in production
-
-### Anti-Bot Measures
-
-1. **Input Capture**: Records all touch/mouse events with timing
-2. **Behavioral Fingerprint**: 64-byte sketch detects automation patterns
-3. **Canvas Fingerprinting**: Samples game state at random points (when enabled)
-4. **Canvas Watermarking**: LSB steganography proves live gameplay (when enabled)
-
-### Server-Side Validation (PRIMARY)
-
-> **This is where real security happens.** Client-side crypto is disabled for performance.
-
-1. **Rate Limiting**: Max ticks per second, sliding window
-2. **Score Delta Validation**: Max score increase per tick
-3. **Monotonic Enforcement**: Score can never decrease
-4. **Sequence Validation**: No gaps, no replays, strict ordering
-5. **Session Binding**: Auth session must match game session
-6. **Behavioral Analysis**: Server analyzes sketch for bot patterns
+4. **Console Stripping**: All `console.*` calls removed in production
+5. **Thread Isolation**: Crypto in Worker - unreachable from game JS context
 
 ---
 
 ## Build System
 
-### Development Build
+### Commands
 
 ```bash
-npm run dev
+npm run dev    # Development build (source maps, logging, no obfuscation)
+npm run build  # Production build (minified, obfuscated, stripped)
 ```
 
-- Source maps enabled
-- Logging enabled
-- No obfuscation
-- No minification
+### Production Output
 
-### Production Build
+Both artifacts are built in parallel:
 
-```bash
-npm run build
+| Config | Entry | Output | Target | Obfuscator |
+|--------|-------|--------|--------|------------|
+| `sdk` | `src/index.ts` | `dist/main.min.4.js` | browser | Yes (domain locked) |
+| `worker` | `src/worker/index.ts` | `dist/security-worker.min.js` | webworker | No |
+
+### Terser Options (Both)
+
+```javascript
+{
+  mangle: { toplevel: true, properties: { regex: /^_/ } },
+  compress: {
+    drop_console: true,
+    drop_debugger: true,
+    passes: 3,
+    toplevel: true,
+  }
+}
 ```
 
-- No source maps
-- Logging stripped
-- Full obfuscation
-- Aggressive minification
+### SDK Shim Obfuscation (Production Only)
+
+- String array encoding (base64)
+- Hexadecimal identifier names
+- Domain lock to WAM origins
+- Console output disabled
+- No control flow flattening (size vs. security tradeoff)
 
 ### Dependencies
 
-```json
-{
-  "@noble/hashes": "^1.x"  // keccak256 implementation
-}
-```
+| Package | Used By | Purpose |
+|---------|---------|---------|
+| `@noble/hashes` | Worker only | keccak256 (Ethereum-compatible) |
+| `terser-webpack-plugin` | Build | Minification |
+| `webpack-obfuscator` | SDK build only | Obfuscation + domain lock |
 
 ---
 
 ## Data Structures
 
-### Rolling Hash State
-
-Internal state maintained by SecurityBridge:
+### Worker Inbound Messages
 
 ```typescript
-interface RollingHashState {
-  sessionId: string;      // Current session ID
-  currentHash: string;    // Latest rolling hash H[w]
-  windowIndex: number;    // Current window number
-  lastNonceW: string;     // Nonce from previous checkpoint ACK
+interface WorkerInitSession {
+  type: 'INIT_SESSION';
+  sessionId: string;
+  screenW: number;
+  screenH: number;
+  ts: number;
+}
+
+interface WorkerProcessCheckpoint {
+  type: 'PROCESS_CHECKPOINT';
+  windowIndex: number;
+  nonceW: string;
+  score: number;
+  events: RawEventTuple[];
+  pixels: Uint8Array | null;
+  screenW: number;
+  screenH: number;
+}
+
+interface WorkerComputeFinalHash {
+  type: 'COMPUTE_FINAL_HASH';
+  sessionId: string;
+  finalScore: number;
 }
 ```
 
-### Checkpoint Response
+### Worker Outbound Messages
 
 ```typescript
-interface CheckpointResponse {
-  controller: '_digitapSecurity';
-  type: 'SDK_CHECKPOINT_RESPONSE';
-  windowIndex: number;      // Which window this is
-  inputDigest: string;      // Always '0x0' (backend computes if needed)
-  events: InputEvent[];     // Actual input events (raw data)
-  canvasHash: string;       // Always '0x0' (sampling disabled)
-  sample: string;           // Empty string
-  rollingHash: string;      // Always '0x0' (backend computes if needed)
-  sketch: string;           // 64-byte behavioral fingerprint
+interface WorkerSessionReady {
+  type: 'SESSION_READY';
+  initialHash: string;
+}
+
+interface WorkerCheckpointResult {
+  type: 'CHECKPOINT_RESULT';
+  windowIndex: number;
+  inputDigest: string;
+  canvasHash: string;
+  rollingHash: string;
+  sketch: string;
+  eventCount: number;
+}
+
+interface WorkerFinalHashResult {
+  type: 'FINAL_HASH_RESULT';
+  finalHash: string;
+  rollingHash: string;
+  totalWindows: number;
 }
 ```
 
-### Input Event Pipeline
+### GameBox Integration Example
 
-```
-DOM Event (touchstart, touchend, mousedown, mouseup, keydown, keyup)
-    │
-    ▼
-RawInputEvent (internal)
-{
-  type: 'touchstart' | 'mousedown' | ...
-  x: 523 (pixels)
-  y: 301 (pixels)
-  ts: 1234567.89 (performance.now)
-  dt: 16.7 (ms since last)
-  pointerId: 0
-}
-    │
-    ▼
-InputEvent (normalized for backend)
-{
-  type: 'tap' | 'swipe' | 'hold' | 'release'
-  x: 0.42 (normalized 0-1)
-  y: 0.38 (normalized 0-1)
-  dt: 17 (rounded ms)
-  pointerId: 0
-}
-    │
-    ▼
-Sent to backend as raw array (no client-side hashing)
-```
+```typescript
+// GameBox spawns the worker
+const securityWorker = new Worker('/sdk/security-worker.min.js');
 
-> **Note:** `touchmove` and `mousemove` events are NOT captured to reduce event volume on mobile.
+// Initialize session
+securityWorker.postMessage({
+  type: 'INIT_SESSION',
+  sessionId: 'abc-123',
+  screenW: screen.width,
+  screenH: screen.height,
+  ts: Date.now()
+});
+
+// Handle worker results
+securityWorker.onmessage = (e) => {
+  switch (e.data.type) {
+    case 'SESSION_READY':
+      console.log('Initial hash:', e.data.initialHash);
+      break;
+
+    case 'CHECKPOINT_RESULT':
+      // Sign with DPoP key and send to backend
+      sendToBackend({
+        windowIndex: e.data.windowIndex,
+        inputDigest: e.data.inputDigest,
+        canvasHash: e.data.canvasHash,
+        rollingHash: e.data.rollingHash,
+        sketch: e.data.sketch,
+      });
+      break;
+
+    case 'FINAL_HASH_RESULT':
+      // Sign with worker wallet and submit final score
+      submitFinalScore({
+        finalHash: e.data.finalHash,
+        rollingHash: e.data.rollingHash,
+        totalWindows: e.data.totalWindows,
+      });
+      break;
+  }
+};
+
+// Every 5 seconds: get raw data from SDK, send to worker
+function onCheckpointTick(rawData: SDKCheckpointResponse, nonceW: string, score: number) {
+  securityWorker.postMessage({
+    type: 'PROCESS_CHECKPOINT',
+    windowIndex: currentWindow,
+    nonceW,
+    score,
+    events: rawData.events,
+    pixels: rawData.pixels,
+    screenW: rawData.screenW,
+    screenH: rawData.screenH,
+  });
+}
+```
 
 ---
 
@@ -935,47 +763,31 @@ Sent to backend as raw array (no client-side hashing)
 ```
 sdk/
 ├── src/
-│   ├── index.ts              # Main SDK entry point
+│   ├── index.ts                  # Main SDK entry point (public API + legacy compat)
+│   ├── streamer.ts               # WebRTC streaming (unchanged)
 │   ├── types/
-│   │   └── index.ts          # TypeScript definitions
-│   └── security/
-│       ├── index.ts          # Module exports
-│       ├── SecurityBridge.ts # Protocol coordinator + rolling hash
-│       ├── InputCapture.ts   # Event capture
-│       ├── CanvasHandler.ts  # Canvas operations
-│       ├── SketchBuilder.ts  # Behavioral fingerprint
-│       ├── MetadataCollector.ts # Device info
-│       ├── logger.ts         # Dev logging
-│       └── utils.ts          # Crypto utilities (keccak256)
+│   │   └── index.ts              # SDK ↔ GameBox protocol types
+│   ├── security/                 # SDK SHIM (runs in game iframe, NO CRYPTO)
+│   │   ├── index.ts              # Module exports
+│   │   ├── SecurityBridge.ts     # Thin postMessage coordinator
+│   │   ├── InputCapture.ts       # Raw event capture ({t,x,y,e} tuples)
+│   │   ├── CanvasHandler.ts      # Raw pixel reader + watermark writer
+│   │   ├── MetadataCollector.ts  # Device/screen metadata
+│   │   └── logger.ts             # Dev-only logging (stripped in prod)
+│   └── worker/                   # SECURITY WORKER (runs in GameBox thread, ALL CRYPTO)
+│       ├── index.ts              # Worker entry point (self.onmessage)
+│       ├── crypto.ts             # keccak256, rolling hash, digests
+│       ├── SketchBuilder.ts      # 64-byte behavioral fingerprint
+│       └── types.ts              # Worker message protocol types
 ├── dist/
-│   └── main.min.js           # Production bundle
+│   ├── main.min.4.js             # SDK shim (obfuscated, domain-locked)
+│   └── security-worker.min.js    # Security worker (minified, no domain lock)
 ├── docs/
-│   └── ARCHITECTURE.md       # This document
-├── webpack.config.js         # Build configuration
-├── tsconfig.json             # TypeScript config
+│   └── ARCHITECTURE.md           # This document
+├── webpack.config.js             # Dual-entry build config
+├── tsconfig.json
 └── package.json
 ```
-
----
-
-## Security Considerations
-
-### What This SDK Protects Against
-
-1. **Score Manipulation**: Rolling hash chain + input verification
-2. **Bot Automation**: Behavioral fingerprints detect non-human patterns
-3. **Video Replay Attacks**: Canvas watermarks prove live gameplay
-4. **Window Omission**: Breaking the rolling hash chain is detected
-5. **Replay Attacks**: Server nonces make each window unique
-6. **Domain Spoofing**: Domain locking prevents SDK on unauthorized sites
-
-### What This SDK Does NOT Protect Against
-
-1. **Memory Editing**: Client-side cheats that modify game memory
-2. **Modified Game Code**: Altered game logic running in the iframe
-3. **Network Interception**: MITM attacks on score submissions
-
-These require server-side validation and are handled by the GameBox/backend.
 
 ---
 
@@ -983,35 +795,14 @@ These require server-side validation and are handled by the GameBox/backend.
 
 | Version | Changes |
 |---------|---------|
-| 3.4.0 | **Performance release**: Disabled all client-side hashing (inputDigest, rollingHash, stateHash return '0x0'). Added death animation grace period (500ms). Added pending pause cancellation on restart/revive. Removed touchmove/mousemove capture. Reduced InputCapture buffer to 5000. |
-| 3.3.0 | WebGL canvas support (Construct 3), StateHash throttling (500ms), player death flow fix (no auto-reset), revive fix (afterStartGame called), SketchBuilder per-checkpoint reset, InputCapture memory leak fix, canonicalJSON recursive sort |
-| 3.2.0 | Added connection retry mechanism (10 retries, 500ms interval, 5s timeout) |
-| 3.1.0 | Added backward compatibility layer for `_digitapUser` (v1.0.0 API), dual protocol support |
+| 4.0.0 | **Worker refactor**: Split into SDK shim + Security Worker. All crypto moved to Web Worker thread. Zero crypto in iframe. Rolling hash, input digest, canvas hash re-enabled (off main thread). Two build artifacts. |
+| 3.4.0 | Performance release: Disabled all client-side hashing for mobile performance. Added death grace period. Removed move event capture. |
+| 3.3.0 | WebGL canvas support, StateHash throttling, player death flow fix, SketchBuilder per-checkpoint reset |
+| 3.2.0 | Connection retry mechanism (10 retries, 500ms interval) |
+| 3.1.0 | Backward compatibility layer for `_digitapUser` (v1.0.0 API) |
 | 3.0.0 | Added keccak256, rolling hash chain, checkpoint protocol |
-| 2.0.0 | Added SecurityBridge module, behavioral fingerprinting, canvas verification |
-| 1.0.0 | Original game SDK with `_digitapUser` global and basic score reporting |
-
-### Compatibility Matrix
-
-| SDK Version | `_digitapUser` API | `digitapSDK()` API | Security Model |
-|-------------|--------------------|--------------------|----------------|
-| 1.0.0 | ✅ Native | ❌ | Basic |
-| 2.0.0 | ❌ | ✅ Native | Input + Canvas |
-| 3.0.0 | ❌ | ✅ Native | Client-side hashing |
-| 3.1.0+ | ✅ Shim | ✅ Native | Client-side hashing |
-| 3.4.0+ | ✅ Shim | ✅ Native | **Server-side validation** (no client hashing) |
-
-### v3.4.0 Breaking Changes
-
-The following fields now always return `'0x0'`:
-- `inputDigest` in checkpoint responses
-- `canvasHash` in checkpoint responses  
-- `rollingHash` in checkpoint responses
-- `stateHash` in score updates
-
-**Backend impact:** If your backend validates these hashes, you need to either:
-1. Compute the hashes server-side from raw data (events, canvas samples)
-2. Skip hash validation entirely and rely on rate limiting + behavioral analysis
+| 2.0.0 | Added SecurityBridge, behavioral fingerprinting, canvas verification |
+| 1.0.0 | Original game SDK with `_digitapUser` global |
 
 ---
 

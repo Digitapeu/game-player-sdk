@@ -1,13 +1,14 @@
 {
   "name": "game-player-sdk",
-  "version": "2.0.0",
+  "version": "4.0.0",
   "description": "A JavaScript/TypeScript SDK that can be used to integrate HTML5/JavaScript games with Digitap's platforms.",
   "private": true,
   "scripts": {
     "dev": "webpack --mode development",
     "build": "webpack --mode production",
     "purge-cache": "tsx src/scripts/purge-cache.ts",
-    "aws:put": "tsx src/scripts/aws-put.ts"
+    "upload": "tsx src/scripts/aws-put.ts",
+    "deploy": "npm run build && tsx src/scripts/aws-put.ts && tsx src/scripts/purge-cache.ts"
   },
   "repository": {
     "type": "git",
