@@ -138,9 +138,11 @@ class DigitapGamePlayerSDK {
   private static _deathTimestamp = 0;
   private static _pendingPauseTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // Deduplication guard - prevents duplicate postMessage calls
-  private static _lastSent: { type: string; score: number; ts: number } | null = null;
-  private static readonly _DEDUP_WINDOW_MS = 50; // Ignore same message within 50ms
+  // Throttle: buffer latest state, send at most once per interval.
+  // Prevents postMessage flood when games call setProgress on every frame.
+  private static _sendScheduled = false;
+  private static _lastSendTs = 0;
+  private static readonly _MIN_SEND_INTERVAL_MS = 100; // Max 10 postMessages/sec for score updates
 
   /**
    * Call a method from the class through a queue.
@@ -259,16 +261,11 @@ class DigitapGamePlayerSDK {
    * Set progress of a game.
    */
   public static setProgress(state: string, score: number, level: number): void {
-    log.info(`setProgress: state=${state}, score=${score}, level=${level}`);
-    
-    this._progress = {
-      type: 'SDK_PLAYER_SCORE_UPDATE',
-      state,
-      score,
-      level,
-      continueScore: score,
-      controller: '_digitapGame',
-    };
+    this._progress.type = 'SDK_PLAYER_SCORE_UPDATE';
+    this._progress.state = state;
+    this._progress.score = score;
+    this._progress.level = level;
+    this._progress.continueScore = score;
 
     this._sendData();
   }
@@ -307,23 +304,40 @@ class DigitapGamePlayerSDK {
 
   /**
    * Sends game data to parent platform.
-   * Includes deduplication to prevent double-sends from games using both old/new APIs.
+   * Score updates (SDK_PLAYER_SCORE_UPDATE) are throttled to max 10/sec.
+   * Important events (LEVEL_UP, PLAYER_FAILED) are sent immediately.
    */
   private static _sendData(): void {
-    const now = Date.now();
-    const { type, score } = this._progress;
+    const type = this._progress.type;
 
-    // Dedupe: skip if same type+score sent within window
-    if (this._lastSent && 
-        this._lastSent.type === type && 
-        this._lastSent.score === score &&
-        (now - this._lastSent.ts) < this._DEDUP_WINDOW_MS) {
-      log.warn(`Skipping duplicate ${type} score=${score} (sent ${now - this._lastSent.ts}ms ago)`);
+    // Important events bypass throttle - send immediately
+    if (type !== 'SDK_PLAYER_SCORE_UPDATE') {
+      this._postProgress();
       return;
     }
 
-    this._lastSent = { type, score, ts: now };
-    log.info(`Sending to parent: ${type}`, this._progress);
+    // Score updates: throttle to prevent postMessage flood
+    const now = Date.now();
+    const elapsed = now - this._lastSendTs;
+
+    if (elapsed >= this._MIN_SEND_INTERVAL_MS) {
+      this._postProgress();
+      return;
+    }
+
+    // Not enough time passed - schedule a send for the remaining interval.
+    // If already scheduled, the scheduled send will pick up the latest _progress.
+    if (!this._sendScheduled) {
+      this._sendScheduled = true;
+      setTimeout(() => {
+        this._sendScheduled = false;
+        this._postProgress();
+      }, this._MIN_SEND_INTERVAL_MS - elapsed);
+    }
+  }
+
+  private static _postProgress(): void {
+    this._lastSendTs = Date.now();
     window.parent.postMessage(this._progress, this._origin ?? '*');
   }
 
@@ -464,76 +478,95 @@ class DigitapGamePlayerSDK {
     let connected = false;
     let isNegotiationNeeded = false;
 
-    const self = this;
+    // Persistent handler references so they can be removed on cleanup
+    let handlers: {
+      connectionState: (() => void) | null;
+      iceConnectionState: (() => void) | null;
+      iceCandidate: ((e: RTCPeerConnectionIceEvent) => void) | null;
+      negotiation: (() => void) | null;
+      signaling: (() => void) | null;
+      message: ((e: MessageEvent) => void) | null;
+    } = { connectionState: null, iceConnectionState: null, iceCandidate: null, negotiation: null, signaling: null, message: null };
+
+    /**
+     * Full teardown: stop all tracks, close connection, null everything.
+     * Prevents ghost MediaStreams from accumulating on reconnect.
+     */
+    function teardown() {
+      // CRITICAL: Stop all MediaStream tracks to release the capture pipeline.
+      // Setting stream = null does NOT stop encoding - tracks must be explicitly stopped.
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+
+      if (connection) {
+        connection.getSenders().forEach(s => { try { connection!.removeTrack(s); } catch {} });
+        if (handlers.connectionState) connection.removeEventListener('connectionstatechange', handlers.connectionState);
+        if (handlers.iceConnectionState) connection.removeEventListener('iceconnectionstatechange', handlers.iceConnectionState);
+        if (handlers.iceCandidate) connection.removeEventListener('icecandidate', handlers.iceCandidate);
+        if (handlers.negotiation) connection.removeEventListener('negotiationneeded', handlers.negotiation);
+        if (handlers.signaling) connection.removeEventListener('signalingstatechange', handlers.signaling);
+        try { connection.close(); } catch {}
+      }
+
+      if (channel) {
+        if (handlers.message) channel.removeEventListener('message', handlers.message);
+        try { channel.close(); } catch {}
+      }
+
+      canvas = null;
+      stream = null;
+      connection = null;
+      channel = null;
+      iceCandidate = null;
+      connected = false;
+      isNegotiationNeeded = false;
+      handlers = { connectionState: null, iceConnectionState: null, iceCandidate: null, negotiation: null, signaling: null, message: null };
+    }
 
     window.addEventListener('message', async (event) => {
       try {
-        // STRICT FILTER: Only accept messages from parent window (GameBox)
-        if (event.source !== window.parent) {
-          return; // Silently ignore - not from GameBox
-        }
-
-        if (!event.data || typeof event.data !== 'object') {
-          return;
-        }
+        if (event.source !== window.parent) return;
+        if (!event.data || typeof event.data !== 'object') return;
 
         const { controller, type, action, offer, tournament_id, username } =
           event.data;
 
-        if (controller !== '_digitapApp' || type !== 'webrtc') {
+        if (controller !== '_digitapApp' || type !== 'webrtc') return;
+
+        if (action === 'close') {
+          if (channel && connected) {
+            try { channel.send(JSON.stringify({ type: 'streamr', action: 'close' })); } catch {}
+          }
+          teardown();
           return;
         }
 
-        if (!connected) {
+        if (action === 'init') {
+          // Tear down any existing session before creating a new one
+          if (connection || stream) teardown();
+
           canvas = document.querySelector('canvas') as CanvasElement;
           if (!canvas) return;
-          
-          stream = canvas.captureStream(30);
+
+          // FPS passed by GameBox, default 15 (30 was overkill and killed mobile)
+          const fps = event.data.fps ?? 15;
+          stream = canvas.captureStream(fps);
+
           connection = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
           });
           channel = connection.createDataChannel(
             `streamr-${tournament_id}-${username}`,
-            {
-              negotiated: true,
-              id: 0,
-            }
+            { negotiated: true, id: 0 }
           );
-        }
 
-        if (action === 'close') {
-          if (connection) {
-            for (const sender of connection.getSenders()) {
-              connection.removeTrack(sender);
-            }
-          }
-
-          canvas = null;
-          stream = null;
-
-          if (channel) {
-            channel.send(JSON.stringify({ type: 'streamr', action: 'close' }));
-          }
-          if (connection) {
-            connection.close();
-          }
-
-          connection = null;
-          channel = null;
-          iceCandidate = null;
-          connected = false;
-          isNegotiationNeeded = false;
-          return;
-        }
-
-        if (action === 'init' && stream && connection && channel) {
           for (const track of stream.getTracks()) {
             connection.addTrack(track, stream);
           }
 
-          const onConnectionStateChange = () => {
+          handlers.connectionState = () => {
             if (!connection) return;
-            
             switch (connection.connectionState) {
               case 'connected':
                 connected = true;
@@ -543,66 +576,24 @@ class DigitapGamePlayerSDK {
                 );
                 break;
               case 'disconnected':
-                if (connection) {
-                  for (const sender of connection.getSenders()) {
-                    connection.removeTrack(sender);
-                  }
-                }
-                canvas = null;
-                stream = null;
-
+              case 'failed':
                 (event.source as Window).postMessage(
                   { type: 'streamr', action: 'disconnected' },
                   event.origin
                 );
-
-                if (channel) channel.close();
-                if (connection) {
-                  connection.close();
-                  connection.removeEventListener(
-                    'connectionstatechange',
-                    onConnectionStateChange
-                  );
-                  connection.removeEventListener(
-                    'iceconnectionstatechange',
-                    onIceConnectionStateChange
-                  );
-                  connection.removeEventListener('icecandidate', onIceCandidate);
-                  connection.removeEventListener(
-                    'negotiationneeded',
-                    onNegotiationNeeded
-                  );
-                  connection.removeEventListener(
-                    'signalingstatechange',
-                    onSignalingStateChange
-                  );
-                }
-                if (channel) {
-                  channel.removeEventListener('message', onMessage);
-                }
-
-                connection = null;
-                channel = null;
-                iceCandidate = null;
-                connected = false;
+                teardown();
                 break;
             }
           };
 
-          const onIceConnectionStateChange = () => {
+          handlers.iceConnectionState = () => {
             if (!connection) return;
-            
-            switch (connection.iceConnectionState) {
-              case 'connected':
-                break;
-              case 'disconnected':
-              case 'failed':
-                connection.restartIce();
-                break;
+            if (connection.iceConnectionState === 'disconnected' || connection.iceConnectionState === 'failed') {
+              try { connection.restartIce(); } catch {}
             }
           };
 
-          const onIceCandidate = (e: RTCPeerConnectionIceEvent) => {
+          handlers.iceCandidate = (e: RTCPeerConnectionIceEvent) => {
             try {
               if (e.candidate) {
                 iceCandidate = e.candidate;
@@ -611,81 +602,50 @@ class DigitapGamePlayerSDK {
                   {
                     type: 'streamr',
                     action: 'answer',
-                    offer: window.btoa(
-                      JSON.stringify(connection.localDescription)
-                    ),
+                    offer: window.btoa(JSON.stringify(connection.localDescription)),
                   },
                   event.origin
                 );
               }
-            } catch {
-              // Ignore errors
-            }
+            } catch {}
           };
 
-          const onMessage = async (messageEvent: MessageEvent) => {
+          handlers.message = async (messageEvent: MessageEvent) => {
             try {
-              if (!messageEvent.data || !connection || !channel) {
-                return;
-              }
-
+              if (!messageEvent.data || !connection || !channel) return;
               const message = JSON.parse(messageEvent.data);
-
               if (message.iceCandidate) {
                 await connection.addIceCandidate(message.iceCandidate);
                 channel.send(JSON.stringify({ iceCandidate }));
               }
-            } catch {
-              // Ignore errors
-            }
+            } catch {}
           };
 
-          const onNegotiationNeeded = async () => {
+          handlers.negotiation = async () => {
             try {
-              if (isNegotiationNeeded || !connection) {
-                return;
-              }
-
+              if (isNegotiationNeeded || !connection) return;
               await connection.setRemoteDescription(JSON.parse(offer));
-              await connection.setLocalDescription(
-                await connection.createAnswer()
-              );
-            } catch {
-              // Ignore errors
-            }
+              await connection.setLocalDescription(await connection.createAnswer());
+            } catch {}
           };
 
-          const onSignalingStateChange = () => {
+          handlers.signaling = () => {
             if (connection) {
               isNegotiationNeeded = connection.signalingState !== 'stable';
             }
           };
 
-          connection.addEventListener(
-            'connectionstatechange',
-            onConnectionStateChange
-          );
-          connection.addEventListener(
-            'iceconnectionstatechange',
-            onIceConnectionStateChange
-          );
-          connection.addEventListener('icecandidate', onIceCandidate);
-          connection.addEventListener(
-            'negotiationneeded',
-            onNegotiationNeeded
-          );
-          connection.addEventListener(
-            'signalingstatechange',
-            onSignalingStateChange
-          );
-          channel.addEventListener('message', onMessage);
+          connection.addEventListener('connectionstatechange', handlers.connectionState);
+          connection.addEventListener('iceconnectionstatechange', handlers.iceConnectionState);
+          connection.addEventListener('icecandidate', handlers.iceCandidate);
+          connection.addEventListener('negotiationneeded', handlers.negotiation);
+          connection.addEventListener('signalingstatechange', handlers.signaling);
+          channel.addEventListener('message', handlers.message);
 
           await connection.setRemoteDescription(JSON.parse(offer));
           await connection.setLocalDescription(await connection.createAnswer());
         }
-      } catch {
-        // Ignore errors
-      }
+      } catch {}
     });
   }
 
